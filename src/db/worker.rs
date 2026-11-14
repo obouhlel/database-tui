@@ -1,0 +1,153 @@
+//! The DB worker: a tokio task that owns the backend. The UI sends
+//! [`DbCommand`]s and receives [`DbEvent`]s; it never awaits a query itself.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+
+use super::catalog::Catalog;
+use super::{Backend, ConnectError, ConnectRequest, ServerInfo};
+use crate::config::password;
+
+#[derive(Debug)]
+pub enum DbCommand {
+    /// Opens a session, replacing the current one. With `resolve_password`,
+    /// the configured password sources are tried when `request.password` is empty.
+    Connect {
+        request: Box<ConnectRequest>,
+        resolve_password: bool,
+    },
+    LoadCatalog {
+        include_system: bool,
+    },
+    Disconnect,
+}
+
+#[derive(Debug)]
+pub enum DbEvent {
+    Connected {
+        info: ServerInfo,
+        elapsed: Duration,
+    },
+    ConnectFailed {
+        error: String,
+        password_required: bool,
+    },
+    CatalogLoaded {
+        catalog: Catalog,
+        elapsed: Duration,
+    },
+    CatalogFailed(String),
+    ConnectionLost(String),
+}
+
+/// Spawns the worker on the current tokio runtime.
+pub fn spawn(events: UnboundedSender<DbEvent>) -> UnboundedSender<DbCommand> {
+    let (tx, rx) = unbounded_channel();
+    tokio::spawn(run(rx, events));
+    tx
+}
+
+async fn run(mut commands: UnboundedReceiver<DbCommand>, events: UnboundedSender<DbEvent>) {
+    let mut backend: Option<Arc<dyn Backend>> = None;
+    // Bumped on every (dis)connection so that late notifications from an old
+    // session are ignored.
+    let generation = Arc::new(AtomicU64::new(0));
+
+    while let Some(cmd) = commands.recv().await {
+        tracing::debug!(?cmd, "db command");
+        match cmd {
+            DbCommand::Connect {
+                request,
+                resolve_password,
+            } => {
+                backend = None;
+                let current = generation.fetch_add(1, Ordering::SeqCst) + 1;
+                let started = Instant::now();
+                let mut request = *request;
+                if resolve_password && request.password.is_none() {
+                    match password::resolve(&request.conn).await {
+                        Ok(found) => {
+                            if let Some((pw, source)) = found {
+                                tracing::info!(connection = %request.conn.name, ?source, "password resolved");
+                                request.password = Some(pw);
+                            }
+                        }
+                        Err(e) => {
+                            send(
+                                &events,
+                                DbEvent::ConnectFailed {
+                                    error: format!("{e:#}"),
+                                    password_required: false,
+                                },
+                            );
+                            continue;
+                        }
+                    }
+                }
+                let on_lost = {
+                    let events = events.clone();
+                    let generation = generation.clone();
+                    Arc::new(move |msg: String| {
+                        if generation.load(Ordering::SeqCst) == current {
+                            send(&events, DbEvent::ConnectionLost(msg));
+                        }
+                    })
+                };
+                match super::connect(&request, on_lost).await {
+                    Ok(b) => {
+                        let info = b.info().clone();
+                        backend = Some(b);
+                        send(
+                            &events,
+                            DbEvent::Connected {
+                                info,
+                                elapsed: started.elapsed(),
+                            },
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(connection = %request.conn.name, "connect failed: {e}");
+                        send(
+                            &events,
+                            DbEvent::ConnectFailed {
+                                password_required: matches!(e, ConnectError::PasswordRequired(_)),
+                                error: e.to_string(),
+                            },
+                        );
+                    }
+                }
+            }
+            DbCommand::LoadCatalog { include_system } => {
+                let Some(b) = backend.clone() else {
+                    send(&events, DbEvent::CatalogFailed("not connected".into()));
+                    continue;
+                };
+                let events = events.clone();
+                tokio::spawn(async move {
+                    let started = Instant::now();
+                    let ev = match b.load_catalog(include_system).await {
+                        Ok(catalog) => DbEvent::CatalogLoaded {
+                            catalog,
+                            elapsed: started.elapsed(),
+                        },
+                        Err(e) => DbEvent::CatalogFailed(format!("{e:#}")),
+                    };
+                    send(&events, ev);
+                });
+            }
+            DbCommand::Disconnect => {
+                generation.fetch_add(1, Ordering::SeqCst);
+                backend = None;
+            }
+        }
+    }
+    tracing::debug!("db worker stopped");
+}
+
+fn send(events: &UnboundedSender<DbEvent>, ev: DbEvent) {
+    // The receiver only disappears when the app is shutting down.
+    let _ = events.send(ev);
+}
