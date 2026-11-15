@@ -14,8 +14,10 @@ use std::time::Duration;
 
 use super::export::Extract;
 use super::grid::{CellStyle, GridSource, GridState, display_width};
+use super::staging::{CellChange, Staging};
 use super::value::{ValueKind, cell_text};
 use crate::db::catalog::{ObjectKind, ObjectRef};
+use crate::db::changes::NewValue;
 use crate::db::data::{ColumnSpec, DataRequest, Filter, SortDir, SortKey};
 use crate::db::schema::{ConstraintKind, ObjectDetails};
 
@@ -32,6 +34,8 @@ pub struct DataColumn {
     pub data_type: String,
     pub kind: ValueKind,
     pub key: bool,
+    /// Filled by the server when left out (default, identity, generated).
+    pub has_default: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -107,6 +111,14 @@ pub struct DataView {
     pub page_size: usize,
     pub estimate: Option<i64>,
     pub last_elapsed: Option<Duration>,
+
+    /// Edits not yet written. New rows are shown above the loaded ones.
+    pub staging: Staging,
+    /// Id of the apply in flight, if any.
+    pub applying: Option<u64>,
+    /// Cursor and scroll to restore once a reload arrives (the grid shrinks
+    /// to one placeholder row meanwhile).
+    pub restore: Option<(usize, usize)>,
 }
 
 impl DataView {
@@ -121,6 +133,7 @@ impl DataView {
                 data_type: c.data_type.clone(),
                 kind: ValueKind::of(&c.data_type),
                 key: false,
+                has_default: c.default.is_some() || c.identity.is_some() || c.generated.is_some(),
             })
             .collect();
 
@@ -177,6 +190,12 @@ impl DataView {
         for c in &mut v.columns {
             c.key = v.key_columns.contains(&c.name);
         }
+        let key_idx = v
+            .key_columns
+            .iter()
+            .filter_map(|k| v.columns.iter().position(|c| &c.name == k))
+            .collect();
+        v.staging = Staging::new(key_idx, v.columns.len());
         v.order_by_ctid = v.key_columns.is_empty()
             && matches!(obj.kind, ObjectKind::Table | ObjectKind::MaterializedView);
         // Key columns first (frozen), then the others in table order.
@@ -196,18 +215,36 @@ impl DataView {
         self.object.as_ref() == Some(obj)
     }
 
+    pub fn column_specs(&self) -> Vec<ColumnSpec> {
+        self.columns
+            .iter()
+            .map(|c| ColumnSpec {
+                name: c.name.clone(),
+                data_type: c.data_type.clone(),
+            })
+            .collect()
+    }
+
+    /// Staged new rows, shown first in the grid.
+    pub fn ins(&self) -> usize {
+        self.staging.inserts()
+    }
+
+    /// Index in the result of grid row `row` (`None` for a new row).
+    pub fn data_index(&self, row: usize) -> Option<usize> {
+        row.checked_sub(self.ins())
+    }
+
+    /// Loaded row shown at grid row `row`.
+    pub fn row_at(&self, row: usize) -> Option<&Vec<Option<String>>> {
+        self.data_index(row).and_then(|i| self.row(i))
+    }
+
     /// The request for `[offset, offset + limit)`.
     pub fn request(&self, offset: usize, limit: usize) -> DataRequest {
         DataRequest {
             object: self.object.clone().expect("data view without object"),
-            columns: self
-                .columns
-                .iter()
-                .map(|c| ColumnSpec {
-                    name: c.name.clone(),
-                    data_type: c.data_type.clone(),
-                })
-                .collect(),
+            columns: self.column_specs(),
             filter: self.filter.clone(),
             sort: self.sort.clone(),
             tiebreak: self.key_columns.clone(),
@@ -220,6 +257,7 @@ impl DataView {
 
     /// Forgets loaded rows after a sort / filter change (keeps the column).
     pub fn reset_rows(&mut self) {
+        self.restore = None;
         self.rows.clear();
         self.start = 0;
         self.total = Total::Unknown;
@@ -250,7 +288,7 @@ impl DataView {
     /// Rows the grid can scroll through: the total when known, else the
     /// loaded end plus one placeholder row that triggers the next page.
     pub fn row_count(&self) -> usize {
-        self.known_total().unwrap_or_else(|| self.end() + 1)
+        self.ins() + self.known_total().unwrap_or_else(|| self.end() + 1)
     }
 
     pub fn row(&self, absolute: usize) -> Option<&Vec<Option<String>>> {
@@ -259,11 +297,11 @@ impl DataView {
             .and_then(|i| self.rows.get(i))
     }
 
-    /// Value of display column `dcol` in row `absolute`: `None` if not
-    /// loaded, `Some(None)` for SQL NULL.
-    pub fn value(&self, absolute: usize, dcol: usize) -> Option<Option<&str>> {
+    /// Loaded value of display column `dcol` at grid row `row`: `None` if
+    /// not loaded (or a new row), `Some(None)` for SQL NULL.
+    pub fn value(&self, row: usize, dcol: usize) -> Option<Option<&str>> {
         let col = *self.order.get(dcol)?;
-        self.row(absolute)
+        self.row_at(row)
             .map(|r| r.get(col).and_then(|v| v.as_deref()))
     }
 
@@ -274,7 +312,11 @@ impl DataView {
         }
         let page = self.page_size;
         let view = self.grid.viewport_rows.max(1);
-        let first = self.grid.row_offset.min(self.grid.row);
+        let first = self
+            .grid
+            .row_offset
+            .min(self.grid.row)
+            .saturating_sub(self.ins());
         let mut last = first + view + page / 4;
         if let Some(t) = self.known_total() {
             last = last.min(t);
@@ -342,10 +384,14 @@ impl DataView {
         }
         if mode == LoadMode::Replace {
             self.measure_widths();
+            if let Some((row, offset)) = self.restore.take() {
+                self.grid.row = row;
+                self.grid.row_offset = offset;
+            }
         }
         self.trim_window();
         if let Some(t) = self.known_total() {
-            self.grid.row = self.grid.row.min(t.saturating_sub(1));
+            self.grid.row = self.grid.row.min((t + self.ins()).saturating_sub(1));
         }
         true
     }
@@ -360,6 +406,7 @@ impl DataView {
         let wanted = self
             .grid
             .row
+            .saturating_sub(self.ins())
             .saturating_sub(max / 2)
             .clamp(self.start, end - max);
         let drop_front = wanted - self.start;
@@ -385,7 +432,7 @@ impl DataView {
         if self.jump_end {
             self.jump_end = false;
             if let Some(t) = self.known_total() {
-                self.grid.bottom(t);
+                self.grid.bottom(t + self.ins());
             }
         }
     }
@@ -554,6 +601,7 @@ impl DataView {
         let cur_row = self
             .grid
             .row
+            .saturating_sub(self.ins())
             .checked_sub(self.start)
             .filter(|r| *r < self.rows.len())
             .unwrap_or(0);
@@ -567,7 +615,7 @@ impl DataView {
             let (r, dc) = (idx / ncols, idx % ncols);
             let col = self.order[dc];
             if self.search_matches(self.rows[r][col].as_deref(), self.columns[col].kind) {
-                return Some((self.start + r, dc));
+                return Some((self.ins() + self.start + r, dc));
             }
         }
         None
@@ -638,7 +686,7 @@ impl DataView {
         let mut missing = 0;
         let mut out = Vec::new();
         for r in rows {
-            match self.row(r) {
+            match self.row_at(r) {
                 Some(row) => out.push(
                     dcols
                         .iter()
@@ -725,6 +773,37 @@ impl GridSource for DataView {
         let Some(&col) = self.order.get(dcol) else {
             return (Cow::Borrowed(""), CellStyle::Normal);
         };
+        let kind = self.columns[col].kind;
+        if row < self.ins() {
+            let v = &self.staging.state.inserts[row][col];
+            let text = match v {
+                NewValue::Text(t) => cell_text(kind, t),
+                other => other.display(),
+            };
+            return (Cow::Borrowed(text), CellStyle::Inserted);
+        }
+        if let Some(r) = self.row_at(row)
+            && let Some(change) = self.staging.cell(r, col)
+        {
+            return match change {
+                CellChange::Deleted => (
+                    Cow::Borrowed(r[col].as_deref().map_or("NULL", |v| cell_text(kind, v))),
+                    CellStyle::Deleted,
+                ),
+                CellChange::Modified(v) | CellChange::Conflict(v) => {
+                    let text = match v {
+                        NewValue::Text(t) => cell_text(kind, t),
+                        other => other.display(),
+                    };
+                    let style = if matches!(change, CellChange::Conflict(_)) {
+                        CellStyle::Conflict
+                    } else {
+                        CellStyle::Modified
+                    };
+                    (Cow::Borrowed(text), style)
+                }
+            };
+        }
         match self.value(row, dcol) {
             None => (Cow::Borrowed("…"), CellStyle::Dim),
             Some(None) => (Cow::Borrowed("NULL"), CellStyle::Null),

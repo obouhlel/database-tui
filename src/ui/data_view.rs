@@ -82,6 +82,42 @@ pub fn draw(frame: &mut Frame, app: &mut App, obj: &ObjectRef, area: Rect) {
         second.push(Span::styled(query.join(" · "), Style::new().fg(t.accent)));
         second.push(Span::raw("   "));
     }
+    if let Some(c) = app.pending_changes() {
+        second.push(Span::styled(
+            format!("en attente : {}", c.describe()),
+            Style::new().fg(t.warning).add_modifier(Modifier::BOLD),
+        ));
+        if d.applying.is_some() {
+            second.push(Span::styled(
+                format!("  {} application…", spinner(app.spinner)),
+                Style::new().fg(t.info),
+            ));
+        }
+        second.push(Span::raw("   "));
+    }
+    if let Some(before) = app.cursor_original() {
+        second.push(Span::styled("avant : ", t.dim()));
+        second.push(match before {
+            Some(v) => Span::styled(
+                v.lines().next().unwrap_or("").to_string(),
+                Style::new().fg(t.fg),
+            ),
+            None => Span::styled("NULL", t.cell(crate::app::grid::CellStyle::Null)),
+        });
+        if let Some(current) = app.cursor_conflict() {
+            second.push(Span::styled(
+                "   actuellement en base : ",
+                Style::new().fg(t.error),
+            ));
+            second.push(Span::styled(
+                current
+                    .map_or("NULL", |v| v.lines().next().unwrap_or(""))
+                    .to_string(),
+                Style::new().fg(t.error).add_modifier(Modifier::BOLD),
+            ));
+        }
+        second.push(Span::raw("   "));
+    }
     if let Some(reason) = &d.read_only_reason {
         second.push(Span::styled(reason.clone(), Style::new().fg(t.warning)));
     } else {
@@ -124,6 +160,13 @@ pub fn draw(frame: &mut Frame, app: &mut App, obj: &ObjectRef, area: Rect) {
         };
         table_view::draw(frame, grid_area, data, &mut grid, &t, &opts);
         app.data.grid = grid;
+        if let Some(Overlay::CellEditor(ed)) = &app.overlay
+            && let crate::app::edit::EditorInput::Line(input) = &ed.input
+            && let Some(cell) =
+                table_view::cell_rect(grid_area, &app.data, &app.data.grid, grid.row, ed.dcol)
+        {
+            super::edit_popups::draw_inline_editor(frame, app, ed, input, cell, grid_area);
+        }
     }
 
     // Input line.

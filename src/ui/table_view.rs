@@ -186,6 +186,35 @@ pub fn draw(
     }
 }
 
+/// Screen position of a cell drawn by [`draw`] in `area` (after a draw, so
+/// that the scroll offsets are up to date): `(x, y, width)` of its text.
+pub fn cell_rect(
+    area: Rect,
+    source: &dyn GridSource,
+    state: &GridState,
+    row: usize,
+    col: usize,
+) -> Option<(u16, u16, u16)> {
+    if row < state.row_offset || row >= state.row_offset + state.viewport_rows {
+        return None;
+    }
+    let widths = source.widths();
+    let frozen = source.frozen().min(widths.len());
+    let mut x: u16 = 0;
+    for c in (0..frozen).chain(frozen + state.col_offset..widths.len()) {
+        if x >= area.width {
+            return None;
+        }
+        let w = (widths[c] + 2).min(area.width - x);
+        if c == col {
+            let y = area.y + 1 + (row - state.row_offset) as u16;
+            return Some((area.x + x + 1, y, w.saturating_sub(2).max(1)));
+        }
+        x += w + 1;
+    }
+    None
+}
+
 /// Scrolls horizontally so that the cursor column is fully visible.
 fn keep_column_visible(state: &mut GridState, widths: &[u16], frozen: usize, width: u16) {
     if state.col < frozen {

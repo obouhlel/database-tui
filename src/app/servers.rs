@@ -178,6 +178,9 @@ impl App {
 
     /// Closes a connection and collapses its node.
     pub(super) fn disconnect(&mut self, name: &str) -> Vec<Effect> {
+        if self.guard(super::edit::After::Disconnect(name.to_string())) {
+            return Vec::new();
+        }
         let Some(s) = self.server_mut(name) else {
             return Vec::new();
         };
@@ -209,6 +212,9 @@ impl App {
 
     /// `dd` on a connection: asks for confirmation.
     pub(super) fn ask_delete(&mut self, name: &str) {
+        if self.guard(super::edit::After::Disconnect(name.to_string())) {
+            return;
+        }
         self.overlay = Some(Overlay::ConfirmDelete(name.to_string()));
     }
 

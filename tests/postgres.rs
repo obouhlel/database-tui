@@ -1132,3 +1132,297 @@ async fn worker_keeps_connections_apart() {
         }
     }
 }
+
+// ------------------------------------------------------------ staging
+
+mod staging {
+    use super::*;
+    use pgtui::db::catalog::ObjectRef;
+    use pgtui::db::changes::{ApplyError, Change, ChangeSet, NewValue};
+    use pgtui::db::data::{ColumnSpec, DataRequest, Filter};
+
+    /// A scratch table `edit_<pid>_<tag>` in its own schema, with 3 rows.
+    async fn scratch(url: &str, tag: &str) -> (tokio_postgres::Client, ObjectRef) {
+        let (client, conn) = tokio_postgres::connect(url, tokio_postgres::NoTls)
+            .await
+            .unwrap();
+        tokio::spawn(conn);
+        let schema = format!("edit_{}_{tag}", std::process::id());
+        client
+            .batch_execute(&format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema};
+                 CREATE TABLE {schema}.items (id integer PRIMARY KEY, name text, price numeric(8,2) DEFAULT 1.50);
+                 INSERT INTO {schema}.items VALUES (1, 'one', 10), (2, 'two', 20), (3, NULL, 30);"
+            ))
+            .await
+            .unwrap();
+        let object = ObjectRef {
+            connection: "test".into(),
+            database: "demo".into(),
+            schema,
+            name: "items".into(),
+            kind: ObjectKind::Table,
+            signature: None,
+        };
+        (client, object)
+    }
+
+    fn columns() -> Vec<ColumnSpec> {
+        [
+            ("id", "integer"),
+            ("name", "text"),
+            ("price", "numeric(8,2)"),
+        ]
+        .iter()
+        .map(|(n, t)| ColumnSpec {
+            name: n.to_string(),
+            data_type: t.to_string(),
+        })
+        .collect()
+    }
+
+    fn key(id: &str) -> Vec<(String, String)> {
+        vec![("id".into(), id.into())]
+    }
+
+    async fn rows(client: &tokio_postgres::Client, object: &ObjectRef) -> Vec<String> {
+        client
+            .query(
+                &format!(
+                    "SELECT format('%s|%s|%s', id, coalesce(name, 'NULL'), price) FROM {}.items ORDER BY id",
+                    object.schema
+                ),
+                &[],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.get(0))
+            .collect()
+    }
+
+    async fn drop(client: &tokio_postgres::Client, object: &ObjectRef) {
+        client
+            .batch_execute(&format!("DROP SCHEMA {} CASCADE", object.schema))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn applies_updates_inserts_and_deletes_in_one_transaction() {
+        let Some(url) = test_url() else { return };
+        let (client, object) = scratch(&url, "ok").await;
+        let backend = db::connect(&request(&url), no_lost()).await.unwrap();
+        // Row versions as the Data tab reads them.
+        let read = backend
+            .fetch_rows(&DataRequest {
+                object: object.clone(),
+                columns: columns(),
+                filter: Filter::default(),
+                sort: vec![],
+                tiebreak: vec!["id".into()],
+                order_by_ctid: false,
+                with_row_version: true,
+                offset: 0,
+                limit: 10,
+            })
+            .await
+            .unwrap();
+        let xmin_of_2 = read.rows[1][3].clone();
+        let set = ChangeSet {
+            object: object.clone(),
+            columns: columns(),
+            changes: vec![
+                Change::Delete {
+                    key: key("2"),
+                    expect_version: xmin_of_2,
+                },
+                Change::Update {
+                    key: key("1"),
+                    set: vec![
+                        ("name".into(), NewValue::Text("l'un".into())),
+                        ("price".into(), NewValue::Text("12.5".into())),
+                    ],
+                    expect: vec![
+                        ("name".into(), Some("one".into())),
+                        ("price".into(), Some("10.00".into())),
+                    ],
+                },
+                Change::Update {
+                    key: key("3"),
+                    set: vec![("name".into(), NewValue::Text("trois".into()))],
+                    expect: vec![("name".into(), None)],
+                },
+                Change::Insert {
+                    values: vec![
+                        ("id".into(), NewValue::Text("4".into())),
+                        ("name".into(), NewValue::Null),
+                        ("price".into(), NewValue::Default),
+                    ],
+                },
+            ],
+        };
+        let counts = backend.apply_changes(&set).await.unwrap();
+        assert_eq!((counts.updated, counts.inserted, counts.deleted), (2, 1, 1));
+        assert_eq!(
+            rows(&client, &object).await,
+            ["1|l'un|12.50", "3|trois|30.00", "4|NULL|1.50"]
+        );
+        drop(&client, &object).await;
+    }
+
+    #[tokio::test]
+    async fn a_conflict_rolls_everything_back() {
+        let Some(url) = test_url() else { return };
+        let (client, object) = scratch(&url, "conflict").await;
+        let backend = db::connect(&request(&url), no_lost()).await.unwrap();
+        // Someone else changes row 2 after it was read.
+        client
+            .batch_execute(&format!(
+                "UPDATE {}.items SET name = 'deux' WHERE id = 2",
+                object.schema
+            ))
+            .await
+            .unwrap();
+        let set = ChangeSet {
+            object: object.clone(),
+            columns: columns(),
+            changes: vec![
+                Change::Update {
+                    key: key("1"),
+                    set: vec![("name".into(), NewValue::Text("changed".into()))],
+                    expect: vec![("name".into(), Some("one".into()))],
+                },
+                Change::Update {
+                    key: key("2"),
+                    set: vec![("name".into(), NewValue::Text("mine".into()))],
+                    expect: vec![("name".into(), Some("two".into()))],
+                },
+            ],
+        };
+        assert_eq!(
+            backend.apply_changes(&set).await.unwrap_err(),
+            ApplyError::Conflict { index: 1 }
+        );
+        assert_eq!(
+            rows(&client, &object).await,
+            ["1|one|10.00", "2|deux|20.00", "3|NULL|30.00"],
+            "the first update was rolled back too"
+        );
+        // A deleted row is a conflict as well.
+        let set = ChangeSet {
+            object: object.clone(),
+            columns: columns(),
+            changes: vec![Change::Delete {
+                key: key("99"),
+                expect_version: None,
+            }],
+        };
+        assert_eq!(
+            backend.apply_changes(&set).await.unwrap_err(),
+            ApplyError::Conflict { index: 0 }
+        );
+        drop(&client, &object).await;
+    }
+
+    #[tokio::test]
+    async fn server_errors_roll_back_and_name_the_change() {
+        let Some(url) = test_url() else { return };
+        let (client, object) = scratch(&url, "error").await;
+        let backend = db::connect(&request(&url), no_lost()).await.unwrap();
+        let set = ChangeSet {
+            object: object.clone(),
+            columns: columns(),
+            changes: vec![
+                Change::Insert {
+                    values: vec![("id".into(), NewValue::Text("5".into()))],
+                },
+                Change::Insert {
+                    values: vec![("id".into(), NewValue::Text("1".into()))],
+                },
+            ],
+        };
+        match backend.apply_changes(&set).await.unwrap_err() {
+            ApplyError::Failed {
+                index: Some(1),
+                message,
+            } => assert!(message.contains("duplicate key"), "{message}"),
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_eq!(rows(&client, &object).await.len(), 3, "nothing inserted");
+        // The session is usable afterwards (no transaction left open).
+        backend
+            .run_script(&format!(
+                "UPDATE {0}.items SET price = 0 WHERE id = 3; DELETE FROM {0}.items WHERE id = 2;",
+                object.schema
+            ))
+            .await
+            .unwrap();
+        assert_eq!(rows(&client, &object).await, ["1|one|10.00", "3|NULL|0.00"]);
+        // A failing script changes nothing.
+        let err = backend
+            .run_script(&format!(
+                "DELETE FROM {0}.items; SELECT 1/0;",
+                object.schema
+            ))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("division by zero"), "{err}");
+        assert_eq!(rows(&client, &object).await.len(), 2);
+        drop(&client, &object).await;
+    }
+
+    #[tokio::test]
+    async fn worker_reports_apply_results() {
+        let Some(url) = test_url() else { return };
+        let (client, object) = scratch(&url, "worker").await;
+        let (tx, mut rx) = unbounded_channel();
+        let commands = worker::spawn(tx);
+        commands
+            .send(DbCommand::Connect {
+                request: Box::new(request(&url)),
+                resolve_password: true,
+            })
+            .unwrap();
+        loop {
+            match next_event(&mut rx).await {
+                DbEvent::Connected { .. } => break,
+                DbEvent::Progress { .. } => {}
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        commands
+            .send(DbCommand::ApplyChanges {
+                id: 7,
+                set: Box::new(ChangeSet {
+                    object: object.clone(),
+                    columns: columns(),
+                    changes: vec![Change::Delete {
+                        key: key("3"),
+                        expect_version: None,
+                    }],
+                }),
+            })
+            .unwrap();
+        match next_event(&mut rx).await {
+            DbEvent::ChangesApplied {
+                id: 7,
+                counts: Some(c),
+                ..
+            } => assert_eq!(c.deleted, 1),
+            other => panic!("unexpected {other:?}"),
+        }
+        commands
+            .send(DbCommand::RunScript {
+                id: 8,
+                object: object.clone(),
+                sql: "SELECT nope".into(),
+            })
+            .unwrap();
+        assert!(matches!(
+            next_event(&mut rx).await,
+            DbEvent::ChangesFailed { id: 8, .. }
+        ));
+        drop(&client, &object).await;
+    }
+}

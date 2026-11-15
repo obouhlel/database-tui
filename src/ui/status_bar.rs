@@ -77,7 +77,12 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
         Mode::Command => t.success,
         Mode::Search => t.matched,
         Mode::Visual | Mode::VisualLine => t.schema,
+        Mode::Edit => t.warning,
+        Mode::Insert => t.success,
     };
+    if let Some(c) = app.pending_changes() {
+        left.push(badge(&format!(" {} en attente ", c.total()), t.warning));
+    }
     left.insert(0, badge(&format!(" {} ", mode.label()), mode_color));
 
     // The left part has priority; the message on the right gets what is left.
@@ -123,7 +128,26 @@ fn right_segment(app: &App) -> Line<'static> {
 pub fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
     let km = &app.keymap;
     let hint = |ctx: Context, a: Action| km.hint(ctx, a).unwrap_or_else(|| "?".into());
-    let items: Vec<(String, &str)> = if app.tree.filter_editing {
+    let items: Vec<(String, &str)> = if let Some(crate::app::Overlay::CellEditor(ed)) = &app.overlay
+        && matches!(ed.input, crate::app::edit::EditorInput::Multi(_))
+    {
+        vec![
+            ("Ctrl+s".into(), "valider"),
+            ("Enter".into(), "nouvelle ligne"),
+            ("Esc".into(), "annuler"),
+            ("Ctrl+n".into(), "NULL"),
+            ("Ctrl+d".into(), "DEFAULT"),
+        ]
+    } else if let Some(crate::app::Overlay::CellEditor(_)) = &app.overlay {
+        vec![
+            ("Enter".into(), "valider"),
+            ("Tab".into(), "colonne suivante"),
+            ("Esc".into(), "annuler"),
+            ("Ctrl+n".into(), "NULL"),
+            ("Ctrl+d".into(), "DEFAULT"),
+            ("Alt+Enter".into(), "multi-ligne"),
+        ]
+    } else if app.tree.filter_editing {
         vec![
             ("Enter".into(), "valider"),
             ("Esc".into(), "effacer"),
@@ -172,7 +196,26 @@ pub fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
                     (hint(Context::Data, Action::Cancel), "annuler la sélection"),
                 ]
             }
+            (Screen::Main, Focus::Center)
+                if app.tab == crate::app::Tab::Data && app.pending_changes().is_some() =>
+            {
+                vec![
+                    (hint(Context::Data, Action::EditCell), "modifier"),
+                    (hint(Context::Data, Action::InsertRow), "nouvelle ligne"),
+                    (hint(Context::Data, Action::DeleteRow), "supprimer"),
+                    (hint(Context::Data, Action::Undo), "annuler"),
+                    (hint(Context::Data, Action::Redo), "rétablir"),
+                    (hint(Context::Data, Action::ShowChanges), "changements"),
+                    (hint(Context::Data, Action::ApplyChanges), "appliquer"),
+                    (
+                        hint(Context::Data, Action::DiscardChanges),
+                        "tout abandonner",
+                    ),
+                ]
+            }
             (Screen::Main, Focus::Center) if app.tab == crate::app::Tab::Data => vec![
+                (hint(Context::Data, Action::EditCell), "modifier"),
+                (hint(Context::Data, Action::InsertRow), "nouvelle ligne"),
                 (hint(Context::Data, Action::Detail), "détail"),
                 (hint(Context::Data, Action::Search), "chercher"),
                 (hint(Context::Data, Action::FilterEditor), "filtrer"),
@@ -180,7 +223,6 @@ pub fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
                 (hint(Context::Data, Action::Sort), "trier"),
                 (hint(Context::Data, Action::Copy), "copier"),
                 (hint(Context::Data, Action::Visual), "sélection"),
-                (hint(Context::Data, Action::HideColumn), "masquer col."),
                 (hint(Context::Global, Action::Help), "aide"),
                 (hint(Context::Global, Action::Quit), "quitter"),
             ],

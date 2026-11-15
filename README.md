@@ -2,8 +2,8 @@
 
 Client PostgreSQL en mode texte (TUI), entièrement pilotable au clavier — une alternative légère à DBeaver pour l'usage quotidien.
 
-> **État : jalon 3 / 6** — arbre des connexions (plusieurs ouvertes à la fois), arbre des objets, onglet Schema, onglet Data en lecture (pagination serveur, tri, filtres, recherche, détail, copie).
-> L'édition et l'onglet SQL arrivent aux jalons suivants (voir [Feuille de route](#feuille-de-route)).
+> **État : jalon 4 / 6** — arbre des connexions (plusieurs ouvertes à la fois), onglet Schema, onglet Data (pagination serveur, tri, filtres, recherche, détail, copie) et édition avec staging, diff, commit transactionnel et détection de conflits.
+> L'onglet SQL arrive au jalon suivant (voir [Feuille de route](#feuille-de-route)).
 
 ## Captures
 
@@ -14,6 +14,8 @@ Client PostgreSQL en mode texte (TUI), entièrement pilotable au clavier — une
 | ![Onglet Schema : colonnes](docs/screenshots/02-schema-colonnes.png) | ![DDL](docs/screenshots/04-ddl.png) |
 | ![Filtre par colonne](docs/screenshots/11-data-filtre.png) | ![Détail d'une ligne](docs/screenshots/12-data-detail.png) |
 | ![Tri et sélection](docs/screenshots/13-data-tri.png) | ![Connexion de production](docs/screenshots/08-prod.png) |
+| ![Changements en attente](docs/screenshots/22-edition-grille.png) | ![Diff avant / après](docs/screenshots/23-diff.png) |
+| ![SQL généré](docs/screenshots/24-sql-genere.png) | ![Conflit détecté](docs/screenshots/26-conflit.png) |
 | ![Plusieurs connexions ouvertes](docs/screenshots/19-multi-connexions.png) | ![Page des connexions](docs/screenshots/01-selecteur.png) |
 
 Captures du vrai binaire, régénérables avec `scripts/screenshots/capture.sh` (tmux, Python, Node + Playwright, base de démo lancée).
@@ -68,6 +70,21 @@ pgtui démarre directement sur l'écran principal : l'arbre à gauche, les donn�
 ## Toutes les bases du serveur
 
 Sous chaque connexion, l'arbre affiche **toutes les bases** du serveur, avec leur taille (`pg_database`, hors modèles). La base de connexion est dépliée ; déplier une autre base ouvre une connexion vers elle, avec les mêmes identifiants, et charge ses schémas. Une base sans le droit `CONNECT` est marquée « accès refusé ». La barre de statut et l'en-tête des onglets indiquent la base de l'objet ouvert.
+
+## Édition des données
+
+Rien n'est écrit en base tant que vous n'avez pas validé : chaque modification est d'abord **mise en attente** (staging), pour la table ouverte.
+
+- `e` (ou `i`) modifie la cellule : éditeur sur place, ou fenêtre multi-ligne pour les textes longs et le JSON (indenté à l'ouverture). `Entrée` valide, `Tab` / `Shift+Tab` valide et passe à la colonne suivante / précédente, `Esc` annule, `Ctrl+n` met `NULL`, `Ctrl+d` met `DEFAULT`, `Alt+Entrée` passe en multi-ligne (où `Ctrl+s` valide).
+- La valeur est vérifiée selon le type avant d'être mise en attente (entiers et leurs bornes, décimaux, réels, booléens, UUID, dates, heures, horodatages, JSON, tableaux) ; l'erreur s'affiche sous la cellule. Le serveur reste juge : chaque valeur lui est envoyée en paramètre et convertie par `CAST`.
+- `o` ajoute une ligne (en haut de la grille, toutes colonnes à `DEFAULT`, curseur sur la première colonne sans valeur par défaut), `dd` marque la ligne (ou la sélection `V`) pour suppression ou la démarque, et retire une ligne ajoutée. `u` annule le dernier changement, `Ctrl+r` le rétablit.
+- Dans la grille, les cellules modifiées, les lignes ajoutées et les lignes supprimées ont chacune leur couleur ; sous le curseur, l'en-tête affiche l'ancienne valeur (« avant : … »). La barre de statut compte les changements en attente.
+- `D` ouvre la vue des changements : tableau **avant → après** groupé par type (UPDATE, INSERT, DELETE), et onglet **SQL généré** (`Tab`) avec les instructions exactes, valeurs en littéraux pour la lecture. `e` permet d'y modifier le SQL avant de l'exécuter (sans détection de conflit dans ce cas).
+- `Ctrl+s` applique tout dans **une seule transaction**, après confirmation affichant le nombre de lignes par type. Sur une connexion de production, il faut taper le nom de la connexion. En cas d'erreur, `ROLLBACK` complet, message du serveur indiquant le changement fautif, et les changements restent en attente pour correction.
+- **Conflits** : un `UPDATE` vérifie dans son `WHERE` que chaque colonne modifiée a toujours sa valeur lue (`t.col::text = $n`) ; un `DELETE` vérifie la version de ligne (`xmin`). Si une ligne a changé entre-temps, rien n'est écrit, les valeurs actuelles sont rechargées et la cellule en conflit est soulignée, avec la valeur actuellement en base. Rééditer la cellule confirme votre valeur sur cette nouvelle base ; `u` annule le changement.
+- `Ctrl+z` ou `X` abandonne tous les changements (avec confirmation ; `u` les restaure).
+- L'édition demande une clé primaire, ou une contrainte unique sur des colonnes `NOT NULL` ; sinon, et sur les vues ou les connexions `read_only`, l'en-tête indique pourquoi la table est en lecture seule.
+- Le staging est propre à une table : ouvrir un autre objet, fermer la connexion ou quitter avec des changements en attente propose de les appliquer (`a`), de les abandonner (`x`) ou de rester (`Esc`).
 
 ## Lancement
 
@@ -221,6 +238,13 @@ Couleurs : noms (`red`, `light-blue`, `orange`…), `#rrggbb` ou index ANSI (`20
 | | `y`, `yy`, `Y` | Copier la cellule (ou la sélection), la ligne, ou la sélection au choix TSV / CSV / JSON / INSERT |
 | | `<` / `>` / `=`, `-` / `+` | Rétrécir / élargir / largeur auto, masquer la colonne / tout réafficher |
 | | `R`, `Ctrl+c` | Relancer la requête, annuler une requête en cours |
+| Édition | `e` · `i` | Modifier la cellule (`Entrée` valider, `Tab` suivante, `Esc` annuler, `Ctrl+n` NULL, `Ctrl+d` DEFAULT, `Alt+Entrée` multi-ligne) |
+| | `o` | Nouvelle ligne |
+| | `dd` | Marquer / démarquer la ligne (ou la sélection) pour suppression |
+| | `u` / `Ctrl+r` | Annuler / rétablir le dernier changement |
+| | `D` | Changements en attente : avant → après, SQL généré (`Tab`), SQL modifiable (`e`) |
+| | `Ctrl+s` | Appliquer en une transaction (confirmation ; nom de la connexion en production) |
+| | `Ctrl+z` · `X` | Abandonner tous les changements (confirmation) |
 
 **Presse-papier** — `auto` utilise le presse-papier système (X11, Wayland, macOS, Windows) et bascule sur la séquence OSC 52 (copie via le terminal) en SSH ou si le presse-papier système est indisponible. Sous tmux, OSC 52 demande `set -g set-clipboard on`.
 
@@ -242,6 +266,7 @@ src/
 │   ├── backend.rs   trait Backend (un moteur = une implémentation)
 │   ├── catalog.rs   modèle neutre des objets (schémas, tables, vues…)
 │   ├── schema.rs    détails neutres d'un objet (colonnes, index, contraintes, FK, stats)
+│   ├── changes.rs   changements en attente (UPDATE / INSERT / DELETE) et résultat de leur application
 │   ├── postgres/    tokio-postgres + rustls : connexions, TLS, catalogue, détails, DDL
 │   ├── discover.rs  détection des serveurs locaux (SSLRequest)
 │   └── worker.rs    tâche qui possède les connexions (une par base, ouvertes à la demande) ; DbCommand → DbEvent
@@ -253,6 +278,7 @@ src/
 - **Séparation état / rendu / I/O** : l'UI ne fait jamais d'appel DB. Le reducer renvoie des `Effect` (commande DB, copie) que la boucle exécute ; le worker répond par des `DbEvent`.
 - **Onglet Data** : chaque colonne est lue en texte (`col::text`), ce qui couvre tous les types (y compris PostGIS, ranges, enums) ; l'affichage s'adapte au type (nombres alignés à droite, JSON indenté, bytea en hexadécimal tronqué, `NULL` distinct de la chaîne vide). Les valeurs des filtres partent en paramètres `$n` convertis côté serveur (`CAST($1::text AS numeric(12,2))`), jamais concaténées. Pagination `LIMIT/OFFSET` triée sur la clé, fenêtre glissante de 10 pages en mémoire, comptage borné à 1 000 000 lignes pour rester rapide sur les grosses tables.
 - **DDL reconstruit depuis le catalogue** (`pg_get_constraintdef`, `pg_get_indexdef`, `pg_get_viewdef`, `pg_get_functiondef`…) : pas de dépendance à `pg_dump`. Un test d'intégration recrée les tables de démo à partir du DDL généré et vérifie que la structure relue est identique. Non inclus : droits (`GRANT`), propriétaire (`ALTER … OWNER`), politiques RLS, options des séquences d'identité.
+- **Staging** (`app/staging.rs`) : les lignes sont identifiées par leur clé, donc les changements survivent au tri, aux filtres et à la pagination. Annuler / rétablir conserve des instantanés de l'état (petit : seules les lignes touchées). Le moteur traduit un `ChangeSet` neutre (`db/changes.rs`) en SQL paramétré (`db/postgres/changes.rs`) ; l'application tient le verrou de la connexion `session` pendant la transaction, pour qu'aucune lecture de page ne s'y glisse.
 - **Deux connexions par session** : `session` (requêtes utilisateur, écritures, transactions) et `catalog` (métadonnées, toujours en lecture seule), pour que l'arbre et l'autocomplétion ne soient jamais bloqués par une requête longue.
 - **Moteurs futurs** : ajouter un module implémentant `db::Backend` (MySQL, SQLite…) et une branche dans `db::connect`.
 - **Pourquoi `tokio-postgres` plutôt que `sqlx`** : requêtes 100 % dynamiques (pas d'intérêt pour les macros vérifiées à la compilation), annulation native (`CancelToken`), paramètres envoyés au format texte pour laisser Postgres analyser les valeurs saisies — jamais de concaténation.
@@ -274,7 +300,7 @@ Sans `PGTUI_TEST_DATABASE_URL`, les tests d'intégration sont ignorés avec un m
 - [x] **Jalon 1** — config, connexions (TLS, mots de passe, lecture seule, prod), arbre des objets, barre de statut, aide, restauration du terminal
 - [x] **Jalon 2** — onglet Schema : colonnes, index, contraintes, triggers, FK entrantes/sortantes (navigation), DDL coloré et copiable, statistiques
 - [x] **Jalon 3** — onglet Data en lecture : tableau virtualisé, pagination serveur, tri, recherche, filtres, vue détail, copie
-- [ ] **Jalon 4** — édition, staging, vue diff, commit transactionnel, détection de conflits
+- [x] **Jalon 4** — édition, staging, vue diff, commit transactionnel, détection de conflits
 - [ ] **Jalon 5** — onglet SQL : éditeur, exécution, résultats, historique, annulation, transactions manuelles
 - [ ] **Jalon 6** — autocomplétion, EXPLAIN, export, finitions
 

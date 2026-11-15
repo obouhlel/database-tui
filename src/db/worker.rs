@@ -14,6 +14,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::{Mutex, OnceCell};
 
 use super::catalog::{Catalog, DatabaseInfo, ObjectRef};
+use super::changes::{ApplyError, ChangeCounts, ChangeSet};
 use super::data::{DataRequest, RowCount, TextRows};
 use super::discover::{self, DiscoveredServer};
 use super::schema::ObjectDetails;
@@ -44,6 +45,17 @@ pub enum DbCommand {
         id: u64,
         request: Box<DataRequest>,
         bound: u64,
+    },
+    /// Apply staged changes in one transaction.
+    ApplyChanges {
+        id: u64,
+        set: Box<ChangeSet>,
+    },
+    /// Run a user-edited script (the generated SQL) in one transaction.
+    RunScript {
+        id: u64,
+        object: ObjectRef,
+        sql: String,
     },
     /// Cancel the query running on the session connection of a database.
     Cancel {
@@ -108,6 +120,16 @@ pub enum DbEvent {
     CountFailed {
         id: u64,
         error: String,
+    },
+    /// `counts` is `None` for a script.
+    ChangesApplied {
+        id: u64,
+        counts: Option<ChangeCounts>,
+        elapsed: Duration,
+    },
+    ChangesFailed {
+        id: u64,
+        error: ApplyError,
     },
     Discovered(Vec<DiscoveredServer>),
     /// A step of a long operation (opening a tunnel, connecting).
@@ -333,6 +355,65 @@ async fn run(mut commands: UnboundedReceiver<DbCommand>, events: UnboundedSender
                     send(&events, ev);
                 });
             }
+            DbCommand::ApplyChanges { id, set } => {
+                let p = pool(&pools, &set.object.connection);
+                let events = events.clone();
+                tokio::spawn(async move {
+                    let started = Instant::now();
+                    let result = match p {
+                        None => Err(not_connected()),
+                        Some(p) => match p.get(&set.object.database).await {
+                            Ok(b) => b.apply_changes(&set).await,
+                            Err(e) => Err(ApplyError::Failed {
+                                index: None,
+                                message: e.to_string(),
+                            }),
+                        },
+                    };
+                    send(
+                        &events,
+                        match result {
+                            Ok(counts) => DbEvent::ChangesApplied {
+                                id,
+                                counts: Some(counts),
+                                elapsed: started.elapsed(),
+                            },
+                            Err(error) => DbEvent::ChangesFailed { id, error },
+                        },
+                    );
+                });
+            }
+            DbCommand::RunScript { id, object, sql } => {
+                let p = pool(&pools, &object.connection);
+                let events = events.clone();
+                tokio::spawn(async move {
+                    let started = Instant::now();
+                    let result = match p {
+                        None => Err(not_connected()),
+                        Some(p) => match p.get(&object.database).await {
+                            Ok(b) => b.run_script(&sql).await.map_err(|e| ApplyError::Failed {
+                                index: None,
+                                message: format!("{e:#}"),
+                            }),
+                            Err(e) => Err(ApplyError::Failed {
+                                index: None,
+                                message: e.to_string(),
+                            }),
+                        },
+                    };
+                    send(
+                        &events,
+                        match result {
+                            Ok(()) => DbEvent::ChangesApplied {
+                                id,
+                                counts: None,
+                                elapsed: started.elapsed(),
+                            },
+                            Err(error) => DbEvent::ChangesFailed { id, error },
+                        },
+                    );
+                });
+            }
             DbCommand::Cancel {
                 connection,
                 database,
@@ -500,6 +581,13 @@ fn watch_tunnel(pool: std::sync::Weak<Pool>, on_lost: super::postgres::OnConnect
             }
         }
     });
+}
+
+fn not_connected() -> ApplyError {
+    ApplyError::Failed {
+        index: None,
+        message: "non connecté".into(),
+    }
 }
 
 fn send(events: &UnboundedSender<DbEvent>, ev: DbEvent) {

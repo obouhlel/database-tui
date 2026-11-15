@@ -171,7 +171,7 @@ pub fn draw_row_detail(frame: &mut Frame, app: &App, scroll: u16, area: Rect) {
     frame.render_widget(Clear, rect);
     frame.render_widget(block, rect);
 
-    let Some(row) = d.row(d.grid.row) else {
+    let Some(row) = d.row_at(d.grid.row) else {
         frame.render_widget(
             Line::styled("Ligne en cours de chargement…", t.dim()),
             inner,

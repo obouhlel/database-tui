@@ -154,6 +154,14 @@ actions! {
     ConnectionsPage => "connections_page", "Page des connexions (serveurs détectés)";
     Disconnect => "disconnect", "Fermer la connexion";
     DeleteConnection => "delete_connection", "Supprimer la connexion de la liste";
+    EditCell => "edit_cell", "Modifier la cellule";
+    InsertRow => "insert_row", "Nouvelle ligne";
+    DeleteRow => "delete_row", "Marquer / démarquer la ligne pour suppression";
+    Undo => "undo", "Annuler le dernier changement";
+    Redo => "redo", "Rétablir le changement";
+    ShowChanges => "show_changes", "Changements en attente (diff, SQL généré)";
+    ApplyChanges => "apply_changes", "Appliquer les changements (une transaction)";
+    DiscardChanges => "discard_changes", "Abandonner tous les changements";
 }
 
 #[derive(Debug, Clone)]
@@ -239,6 +247,14 @@ fn defaults() -> Vec<(Context, Action, &'static [&'static str])> {
         (Data, HideColumn, &["-"]),
         (Data, ShowColumns, &["+"]),
         (Data, Refresh, &["R"]),
+        (Data, EditCell, &["e", "i"]),
+        (Data, InsertRow, &["o"]),
+        (Data, DeleteRow, &["dd"]),
+        (Data, Undo, &["u"]),
+        (Data, Redo, &["ctrl+r"]),
+        (Data, ShowChanges, &["D"]),
+        (Data, ApplyChanges, &["ctrl+s"]),
+        (Data, DiscardChanges, &["ctrl+z", "X"]),
         (Data, Cancel, &["esc"]),
     ];
     for ctx in [Picker, Tree, Center, Schema, Data] {

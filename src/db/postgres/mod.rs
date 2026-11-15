@@ -6,6 +6,7 @@
 //!   blocked behind a long user query. It is always read-only.
 
 mod catalog;
+pub mod changes;
 pub mod ddl;
 mod details;
 pub mod query;
@@ -20,6 +21,7 @@ use tokio_postgres::error::SqlState;
 
 use super::backend::{Backend, BackendKind, ServerInfo};
 use super::catalog::{Catalog, DatabaseInfo, ObjectRef};
+use super::changes::{ApplyError, ChangeCounts, ChangeSet};
 use super::data::{DataRequest, RowCount, TextRows};
 use super::schema::ObjectDetails;
 use super::{ConnectError, ConnectRequest};
@@ -35,6 +37,9 @@ pub struct PgBackend {
     /// Cancels the query running on the session connection.
     cancel: tokio_postgres::CancelToken,
     tls: tokio_postgres_rustls::MakeRustlsConnect,
+    /// Held while a transaction runs on the session connection, so that no
+    /// other statement (a page of rows) lands inside it.
+    session_lock: tokio::sync::Mutex<()>,
 }
 
 impl PgBackend {
@@ -100,6 +105,7 @@ impl PgBackend {
             info,
             cancel,
             tls,
+            session_lock: tokio::sync::Mutex::new(()),
         })
     }
 }
@@ -206,6 +212,7 @@ impl Backend for PgBackend {
 
     async fn fetch_rows(&self, req: &DataRequest) -> anyhow::Result<TextRows> {
         let sql = query::select(req);
+        let _guard = self.session_lock.lock().await;
         let rows = self
             .session
             .query(&sql.text, &params(&sql.params))
@@ -240,6 +247,80 @@ impl Backend for PgBackend {
         } else {
             RowCount::Exact(n)
         })
+    }
+
+    async fn apply_changes(&self, set: &ChangeSet) -> Result<ChangeCounts, ApplyError> {
+        let _guard = self.session_lock.lock().await;
+        let failed = |index, e: tokio_postgres::Error| ApplyError::Failed {
+            index,
+            message: format!("{:#}", pg_error(e)),
+        };
+        self.session
+            .batch_execute("BEGIN")
+            .await
+            .map_err(|e| failed(None, e))?;
+        let mut outcome = Ok(());
+        for (index, (st, change)) in changes::statements(set)
+            .iter()
+            .zip(&set.changes)
+            .enumerate()
+        {
+            let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = st
+                .params
+                .iter()
+                .map(|v| v as &(dyn tokio_postgres::types::ToSql + Sync))
+                .collect();
+            match self.session.execute(&st.text, &params).await {
+                Ok(0) if change.checks_one_row() => {
+                    outcome = Err(ApplyError::Conflict { index });
+                    break;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    outcome = Err(failed(Some(index), e));
+                    break;
+                }
+            }
+        }
+        match outcome {
+            Ok(()) => {
+                if let Err(e) = self.session.batch_execute("COMMIT").await {
+                    // A deferred constraint can fail at commit time.
+                    let _ = self.session.batch_execute("ROLLBACK").await;
+                    return Err(failed(None, e));
+                }
+                tracing::info!(table = %set.object.qualified(), changes = set.changes.len(), "changes applied");
+                Ok(set.counts())
+            }
+            Err(e) => {
+                if let Err(r) = self.session.batch_execute("ROLLBACK").await {
+                    tracing::error!("rollback failed: {r}");
+                }
+                tracing::warn!(table = %set.object.qualified(), "changes rolled back: {e}");
+                Err(e)
+            }
+        }
+    }
+
+    async fn run_script(&self, sql: &str) -> anyhow::Result<()> {
+        let _guard = self.session_lock.lock().await;
+        self.session
+            .batch_execute("BEGIN")
+            .await
+            .map_err(pg_error)?;
+        match self.session.batch_execute(sql).await {
+            Ok(()) => {
+                if let Err(e) = self.session.batch_execute("COMMIT").await {
+                    let _ = self.session.batch_execute("ROLLBACK").await;
+                    return Err(pg_error(e));
+                }
+                Ok(())
+            }
+            Err(e) => {
+                let _ = self.session.batch_execute("ROLLBACK").await;
+                Err(pg_error(e))
+            }
+        }
     }
 
     async fn cancel(&self) -> anyhow::Result<()> {

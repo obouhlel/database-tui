@@ -55,11 +55,12 @@ start() { # args, width, height
   for _ in 1 2 3 4 5; do
     sleep 0.5
     tmux -f "$WORK/tmux.conf" new-session -d -s pg -x "$2" -y "$3" \
-      "env XDG_CONFIG_HOME=$WORK/config XDG_STATE_HOME=$WORK/state COLORTERM=truecolor $BIN $1; sleep 120" && break
+      "env XDG_CONFIG_HOME=${CONFIG:-$WORK/config} XDG_STATE_HOME=$WORK/state COLORTERM=truecolor $BIN $1; sleep 120" && break
   done
   sleep 1.5
 }
 keys() { for k in "$@"; do tmux send-keys -t pg -- "$k"; sleep 0.15; done; sleep 0.6; }
+text() { tmux send-keys -t pg -l -- "$1"; sleep 0.4; }
 shot() { # name, title, [palette]
   tmux capture-pane -e -N -p -t pg > "$WORK/$1.ans"
   python3 -I "$HERE/ansi2html.py" "$WORK/$1.ans" "$WORK/$1.html" "$2" "${3:-tokyonight}"
@@ -98,6 +99,61 @@ keys C-h 1; sleep 0.8; keys C-l; sleep 0.3
 start "--connection demo" 130 26
 keys / o r d e r s Enter Enter 2; sleep 1; keys l l l s s; sleep 1; keys / p a i d Enter; sleep 0.5
 palettes 18-theme "pgtui — thème terminal"
+
+# Editing scenes (milestone 4): a scratch table, recreated on each run.
+export PGPASSWORD=pgtui
+PSQL=(psql -h localhost -p 5433 -U pgtui -d demo -qX -v ON_ERROR_STOP=1)
+"${PSQL[@]}" <<'SQL'
+DROP SCHEMA IF EXISTS atelier CASCADE;
+CREATE SCHEMA atelier;
+CREATE TABLE atelier.produits (id serial PRIMARY KEY, nom text NOT NULL, prix numeric(8,2),
+  stock integer DEFAULT 0, actif boolean DEFAULT true, attributs jsonb);
+INSERT INTO atelier.produits (nom, prix, stock, actif, attributs) VALUES
+ ('Clavier', 49.90, 12, true, '{"couleur": "noir", "dispo": ["FR", "BE"]}'),
+ ('Souris', 19.50, 40, true, NULL),
+ ('Écran 27"', 289.00, 3, true, '{"taille": 27}'),
+ ('Câble USB-C', 9.99, 150, true, NULL),
+ ('Casque', 79.00, 0, false, '{"sans_fil": true}');
+SQL
+mkdir -p "$WORK/config-edit/pgtui"
+cat > "$WORK/config-edit/pgtui/config.toml" <<'TOML'
+[[connections]]
+name = "demo"
+port = 5433
+user = "pgtui"
+database = "demo"
+password_cmd = "printf pgtui"
+color = "cyan"
+[[connections]]
+name = "prod"
+port = 5433
+user = "pgtui"
+database = "demo"
+password_cmd = "printf pgtui"
+color = "red"
+TOML
+export CONFIG="$WORK/config-edit/"
+start "--connection demo" 140 24
+keys / p r o d u i t s Enter Enter 2; sleep 1
+keys l e C-u; text "Clavier mécanique"; keys Enter
+keys j l e C-u; text "abc"; keys Enter; shot 20-edition-validation "pgtui — validation du type avant staging"
+keys Escape G d d g g o; text "Webcam"; keys Tab; text "59.00"; keys Tab; text "8"; keys Enter
+keys j '$' e Down End BSpace BSpace BSpace BSpace BSpace BSpace BSpace; text '"blanc",'
+shot 21-edition-json "pgtui — édition d'une valeur JSON"
+keys C-s j; shot 22-edition-grille "pgtui — changements en attente dans la grille"
+keys D; shot 23-diff "pgtui — changements en attente : avant / après"
+keys Tab; shot 24-sql-genere "pgtui — changements en attente : SQL généré"
+keys C-s; shot 25-confirmation "pgtui — confirmation avant écriture"
+keys o; sleep 1
+keys g g j 0 l l e C-u; text "17.90"; keys Enter
+"${PSQL[@]}" -c "UPDATE atelier.produits SET prix = 21.00 WHERE id = 2"
+keys C-s o; sleep 1; shot 26-conflit "pgtui — conflit détecté : rien n'est écrit"
+keys Escape; shot 28-conflit-grille "pgtui — cellule en conflit et valeur actuelle"
+start "--connection prod" 140 24
+keys / p r o d u i t s Enter Enter 2; sleep 1
+keys j j d d C-s; text "pr"; shot 27-confirmation-prod "pgtui — confirmation sur une connexion de production"
+unset CONFIG
+"${PSQL[@]}" -c "DROP SCHEMA atelier CASCADE"
 
 # Discovery scenes: need a server on 127.0.0.1:5432 whose `postgres` user has
 # the password $PGTUI_SHOT_PASSWORD (default: secret).

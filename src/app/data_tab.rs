@@ -95,6 +95,12 @@ impl App {
         }
     }
 
+    /// Reloads the rows, keeping the cursor (after applying changes).
+    pub(super) fn requery_data(&mut self) {
+        self.requery(true);
+        self.data.error = None;
+    }
+
     /// Reloads rows after a query change, keeping the cursor where possible.
     fn requery(&mut self, keep_position: bool) {
         let (row, offset) = (self.data.grid.row, self.data.grid.row_offset);
@@ -102,6 +108,7 @@ impl App {
         if keep_position {
             self.data.grid.row = row;
             self.data.grid.row_offset = offset;
+            self.data.restore = Some((row, offset));
         }
     }
 
@@ -110,7 +117,21 @@ impl App {
         if self.current.as_ref().is_none_or(|o| !self.data.is_for(o)) {
             return Vec::new();
         }
+        if matches!(
+            action,
+            EditCell
+                | InsertRow
+                | DeleteRow
+                | Undo
+                | Redo
+                | ShowChanges
+                | ApplyChanges
+                | DiscardChanges
+        ) {
+            return self.dispatch_edit(action);
+        }
         let rows = self.data.row_count();
+        let ins = self.data.ins();
         let g = &mut self.data.grid;
         match action {
             Up => g.move_by(-1, rows),
@@ -121,9 +142,9 @@ impl App {
             PageUp => g.move_by(-g.page(), rows),
             Top => g.top(),
             Bottom => match (self.data.known_total(), self.data.total) {
-                (Some(t), _) => self.data.grid.bottom(t),
+                (Some(t), _) => self.data.grid.bottom(t + ins),
                 (None, Total::AtLeast(n)) => {
-                    let end = self.data.end();
+                    let end = self.data.end() + ins;
                     self.data.grid.bottom(end);
                     self.notify(
                         Level::Info,
@@ -143,7 +164,7 @@ impl App {
             FirstColumn => self.data.grid.col = 0,
             LastColumn => self.data.move_col(isize::MAX / 2),
             Detail => {
-                if self.data.row(self.data.grid.row).is_some() {
+                if self.data.row_at(self.data.grid.row).is_some() {
                     self.overlay = Some(Overlay::RowDetail { scroll: 0 });
                 }
             }
@@ -444,9 +465,16 @@ impl App {
                 _ => "?".into(),
             },
         };
+        let ins = self.data.ins();
+        if self.data.grid.row < ins {
+            return Some(format!("nouvelle ligne {} / {ins}", self.data.grid.row + 1));
+        }
         if self.data.known_total() == Some(0) {
             return Some("0 ligne".into());
         }
-        Some(format!("ligne {} / {total}", fmt(self.data.grid.row + 1)))
+        Some(format!(
+            "ligne {} / {total}",
+            fmt(self.data.grid.row - ins + 1)
+        ))
     }
 }

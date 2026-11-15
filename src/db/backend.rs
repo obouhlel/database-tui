@@ -5,6 +5,7 @@
 use async_trait::async_trait;
 
 use super::catalog::{Catalog, DatabaseInfo, ObjectRef};
+use super::changes::{ApplyError, ChangeCounts, ChangeSet};
 use super::data::{DataRequest, RowCount, TextRows};
 use super::schema::ObjectDetails;
 
@@ -53,6 +54,15 @@ pub trait Backend: Send + Sync {
     /// Number of rows matching the request's filter, counting at most
     /// `bound + 1` rows (catalog connection, never blocks the session).
     async fn count_rows(&self, req: &DataRequest, bound: u64) -> anyhow::Result<RowCount>;
+
+    /// Applies staged changes in one transaction on the session connection.
+    /// Everything is rolled back on the first error or conflict (an update
+    /// or delete that matches no row).
+    async fn apply_changes(&self, set: &ChangeSet) -> Result<ChangeCounts, ApplyError>;
+
+    /// Runs a script written or edited by the user in one transaction
+    /// (rolled back on error).
+    async fn run_script(&self, sql: &str) -> anyhow::Result<()>;
 
     /// Asks the server to cancel the query running on the session connection.
     async fn cancel(&self) -> anyhow::Result<()>;

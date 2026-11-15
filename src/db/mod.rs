@@ -3,6 +3,7 @@
 
 pub mod backend;
 pub mod catalog;
+pub mod changes;
 pub mod data;
 pub mod discover;
 pub mod postgres;

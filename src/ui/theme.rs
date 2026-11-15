@@ -223,6 +223,14 @@ impl Theme {
                 .add_modifier(Modifier::UNDERLINED),
             CellStyle::Accent => Style::new().fg(self.accent),
             CellStyle::Warning => Style::new().fg(self.warning),
+            CellStyle::Modified => Style::new().fg(self.warning).add_modifier(Modifier::BOLD),
+            CellStyle::Inserted => Style::new().fg(self.success),
+            CellStyle::Deleted => Style::new()
+                .fg(self.error)
+                .add_modifier(Modifier::CROSSED_OUT),
+            CellStyle::Conflict => Style::new()
+                .fg(self.error)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
         }
     }
 

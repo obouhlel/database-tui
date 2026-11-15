@@ -640,6 +640,253 @@ mod data_tab {
         }));
         assert_eq!(app.data.rows.len(), 200);
     }
+
+    // ------------------------------------------------------------ editing
+
+    use crate::db::changes::{ApplyError, Change, NewValue};
+
+    fn applied(effects: &[Effect]) -> Option<(u64, crate::db::changes::ChangeSet)> {
+        effects.iter().find_map(|e| match e {
+            Effect::Db(DbCommand::ApplyChanges { id, set }) => Some((*id, (**set).clone())),
+            _ => None,
+        })
+    }
+
+    /// Row id=1, column status: "s1" -> "paid".
+    fn edited_app() -> App {
+        let mut app = data_app(1000);
+        key(&mut app, "j l e");
+        assert_eq!(app.mode(), Mode::Edit);
+        key(&mut app, "ctrl+u");
+        typed(&mut app, "paid");
+        key(&mut app, "enter");
+        assert!(app.overlay.is_none());
+        app
+    }
+
+    #[test]
+    fn edit_a_cell_then_apply() {
+        let mut app = edited_app();
+        assert_eq!(app.pending_changes().map(|c| c.updated), Some(1));
+        assert_eq!(app.cursor_original(), Some(Some("s1")));
+        let (text, style) = crate::app::grid::GridSource::cell(&app.data, 1, 1);
+        assert_eq!(
+            (text.as_ref(), style),
+            ("paid", crate::app::grid::CellStyle::Modified)
+        );
+
+        key(&mut app, "ctrl+s");
+        assert!(matches!(
+            app.overlay,
+            Some(Overlay::ConfirmApply {
+                production: false,
+                ..
+            })
+        ));
+        let effects = key_effects(&mut app, "o");
+        let (id, set) = applied(&effects).expect("apply requested");
+        assert_eq!(
+            set.changes,
+            vec![Change::Update {
+                key: vec![("id".into(), "1".into())],
+                set: vec![("status".into(), NewValue::Text("paid".into()))],
+                expect: vec![("status".into(), Some("s1".into()))],
+            }]
+        );
+        assert!(key(&mut app, "e").is_empty());
+        assert!(app.overlay.is_none(), "no edition while applying");
+
+        let effects = app.update(Msg::Db(DbEvent::ChangesApplied {
+            id,
+            counts: Some(set.counts()),
+            elapsed: Duration::from_millis(4),
+        }));
+        assert!(app.pending_changes().is_none());
+        assert!(!fetches(&effects).is_empty(), "rows reloaded");
+        assert_eq!(app.status.as_ref().map(|s| s.level), Some(Level::Success));
+    }
+
+    #[test]
+    fn invalid_value_keeps_the_editor() {
+        let mut app = data_app(10);
+        key(&mut app, "e");
+        key(&mut app, "ctrl+u");
+        typed(&mut app, "abc");
+        key(&mut app, "enter");
+        match &app.overlay {
+            Some(Overlay::CellEditor(ed)) => {
+                assert!(ed.error.as_deref().unwrap().contains("entier"))
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        // Ctrl+n stages NULL whatever the text.
+        key(&mut app, "esc");
+        key(&mut app, "l e ctrl+n");
+        assert!(app.overlay.is_none());
+        assert_eq!(
+            crate::app::grid::GridSource::cell(&app.data, 0, 1)
+                .0
+                .as_ref(),
+            "NULL"
+        );
+    }
+
+    #[test]
+    fn insert_delete_undo_redo() {
+        let mut app = data_app(1000);
+        key(&mut app, "o");
+        assert_eq!(app.mode(), Mode::Insert);
+        key(&mut app, "esc");
+        assert_eq!(app.data_position().as_deref(), Some("nouvelle ligne 1 / 1"));
+        assert_eq!(app.data.row_count(), 1001);
+        key(&mut app, "j");
+        assert_eq!(app.data_position().as_deref(), Some("ligne 1 / 1 000"));
+        key(&mut app, "d d");
+        let c = app.pending_changes().unwrap();
+        assert_eq!((c.inserted, c.deleted), (1, 1));
+        key(&mut app, "u");
+        assert_eq!(app.pending_changes().unwrap().deleted, 0);
+        key(&mut app, "ctrl+r");
+        assert_eq!(app.pending_changes().unwrap().deleted, 1);
+        // dd on the new row removes it.
+        key(&mut app, "gg d d");
+        assert_eq!(app.pending_changes().unwrap().inserted, 0);
+        // Discard everything, with confirmation.
+        key(&mut app, "X");
+        assert!(matches!(app.overlay, Some(Overlay::ConfirmDiscard)));
+        key(&mut app, "o");
+        assert!(app.pending_changes().is_none());
+    }
+
+    #[test]
+    fn conflict_keeps_changes_and_marks_the_cell() {
+        let mut app = edited_app();
+        key(&mut app, "ctrl+s");
+        let (id, _) = applied(&key_effects(&mut app, "o")).unwrap();
+        let effects = app.update(Msg::Db(DbEvent::ChangesFailed {
+            id,
+            error: ApplyError::Conflict { index: 0 },
+        }));
+        match &app.overlay {
+            Some(Overlay::Error { message, .. }) => {
+                assert!(
+                    message.contains("Conflit") && message.contains("id = 1"),
+                    "{message}"
+                )
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        let f = fetches(&effects);
+        assert!(!f.is_empty(), "current values reloaded");
+        app.update(Msg::Db(DbEvent::RowsLoaded {
+            id: f[0].0,
+            offset: f[0].1,
+            rows: rows(f[0].1, f[0].2),
+            elapsed: Duration::ZERO,
+        }));
+        assert_eq!(app.data.grid.row, 1, "cursor kept on the edited row");
+        assert_eq!(app.pending_changes().map(|c| c.updated), Some(1));
+        let row = app.data.row_at(1).cloned();
+        if let Some(row) = row {
+            assert!(matches!(
+                app.data.staging.cell(&row, 1),
+                Some(crate::app::staging::CellChange::Conflict(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn leaving_the_table_asks_first() {
+        let mut app = edited_app();
+        key(&mut app, "ctrl+h k enter");
+        assert!(matches!(app.overlay, Some(Overlay::PendingChanges(_))));
+        assert_eq!(app.current.as_ref().unwrap().name, "orders");
+        key(&mut app, "esc");
+        assert_eq!(app.current.as_ref().unwrap().name, "orders", "stays");
+        key(&mut app, "enter");
+        key(&mut app, "x");
+        assert_eq!(app.current.as_ref().unwrap().name, "customers");
+        assert!(app.pending_changes().is_none());
+    }
+
+    #[test]
+    fn quitting_asks_then_apply_and_quit() {
+        let mut app = edited_app();
+        key(&mut app, "q");
+        assert!(!app.should_quit);
+        key(&mut app, "a");
+        assert!(matches!(app.overlay, Some(Overlay::ConfirmApply { .. })));
+        let (id, set) = applied(&key_effects(&mut app, "enter")).unwrap();
+        app.update(Msg::Db(DbEvent::ChangesApplied {
+            id,
+            counts: Some(set.counts()),
+            elapsed: Duration::ZERO,
+        }));
+        assert!(app.should_quit, "quits once applied");
+    }
+
+    #[test]
+    fn production_requires_the_connection_name() {
+        let mut app = edited_app();
+        app.servers[0].conn.production = Some(true);
+        key(&mut app, "ctrl+s");
+        assert!(matches!(
+            app.overlay,
+            Some(Overlay::ConfirmApply {
+                production: true,
+                ..
+            })
+        ));
+        // `o` is text here, not a confirmation.
+        assert!(applied(&key_effects(&mut app, "o")).is_none());
+        let effects = key_effects(&mut app, "enter");
+        assert!(applied(&effects).is_none());
+        assert_eq!(app.status.as_ref().map(|s| s.level), Some(Level::Warning));
+        key(&mut app, "ctrl+s");
+        typed(&mut app, "local");
+        assert!(applied(&key_effects(&mut app, "enter")).is_some());
+    }
+
+    #[test]
+    fn changes_view_and_generated_sql() {
+        let mut app = edited_app();
+        key(&mut app, "j d d");
+        key(&mut app, "D");
+        let Some(Overlay::Changes(v)) = &app.overlay else {
+            panic!("changes view expected");
+        };
+        let ops: Vec<&str> = v.grid.rows.iter().map(|r| r[0].text.as_str()).collect();
+        assert_eq!(ops, ["UPDATE", "DELETE"]);
+        assert!(
+            v.sql
+                .starts_with("DELETE FROM public.orders AS t WHERE t.id = '2'::bigint"),
+            "{}",
+            v.sql
+        );
+        assert!(v.sql.contains("SET status = 'paid'::text"), "{}", v.sql);
+        key(&mut app, "tab e");
+        let Some(Overlay::Changes(v)) = &app.overlay else {
+            panic!("changes view expected");
+        };
+        assert!(v.editing.is_some());
+        key(&mut app, "ctrl+s");
+        let effects = key_effects(&mut app, "o");
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::Db(DbCommand::RunScript { .. })))
+        );
+    }
+
+    #[test]
+    fn read_only_tables_refuse_edits() {
+        let mut app = data_app(10);
+        app.data.read_only_reason = Some("connexion en lecture seule".into());
+        key(&mut app, "e");
+        key(&mut app, "o");
+        assert!(app.overlay.is_none() && app.pending_changes().is_none());
+        assert_eq!(app.status.as_ref().map(|s| s.level), Some(Level::Warning));
+    }
 }
 
 // ------------------------------------------- discovery and several databases

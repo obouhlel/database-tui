@@ -5,6 +5,7 @@
 mod center;
 mod data_popups;
 mod data_view;
+mod edit_popups;
 mod help;
 mod picker;
 mod popup;
@@ -84,6 +85,31 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Some(Overlay::Login(form)) => popup::draw_login(frame, app, form, body),
         Some(Overlay::SaveServer(conn)) => popup::draw_save_server(frame, app, conn, body),
         Some(Overlay::ConfirmDelete(name)) => popup::draw_confirm_delete(frame, app, name, body),
+        Some(Overlay::CellEditor(ed)) => {
+            if matches!(ed.input, crate::app::edit::EditorInput::Multi(_)) {
+                edit_popups::draw_multi_editor(frame, app, ed, body);
+            }
+        }
+        Some(Overlay::Changes(v)) => edit_popups::draw_changes(frame, app, v, body),
+        Some(Overlay::ConfirmApply {
+            counts,
+            production,
+            script,
+            input,
+            ..
+        }) => edit_popups::draw_confirm_apply(
+            frame,
+            app,
+            counts,
+            *production,
+            script.is_some(),
+            input,
+            body,
+        ),
+        Some(Overlay::ConfirmDiscard) => edit_popups::draw_confirm_discard(frame, app, body),
+        Some(Overlay::PendingChanges(after)) => {
+            edit_popups::draw_pending_changes(frame, app, after, body)
+        }
         // Drawn inside the Data tab.
         Some(Overlay::DataSearch { .. } | Overlay::FreeWhere(_)) => {}
         Some(Overlay::Command(_)) | None => {}

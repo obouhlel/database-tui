@@ -8,6 +8,7 @@
 mod data_tab;
 pub mod data_view;
 pub mod discovery;
+pub mod edit;
 pub mod export;
 pub mod filter_editor;
 pub mod format;
@@ -16,7 +17,10 @@ pub mod input;
 pub mod schema_view;
 pub mod server;
 mod servers;
+pub mod staging;
+pub mod textarea;
 pub mod tree;
+pub mod validate;
 pub mod value;
 
 use std::path::PathBuf;
@@ -135,6 +139,10 @@ pub enum Mode {
     Search,
     Visual,
     VisualLine,
+    /// Editing a cell of an existing row.
+    Edit,
+    /// Editing a cell of a new row.
+    Insert,
 }
 
 impl Mode {
@@ -146,6 +154,8 @@ impl Mode {
             Mode::Search => "SEARCH",
             Mode::Visual => "VISUAL",
             Mode::VisualLine => "V-LINE",
+            Mode::Edit => "EDIT",
+            Mode::Insert => "INSERT",
         }
     }
 }
@@ -204,6 +214,24 @@ pub enum Overlay {
     ConfirmDelete(String),
     /// Offer to save a discovered server in `config.toml`.
     SaveServer(Box<ConnectionConfig>),
+    /// `e`: value of a cell (Data tab).
+    CellEditor(Box<edit::CellEditor>),
+    /// `D`: pending changes (diff and generated SQL).
+    Changes(Box<edit::ChangesView>),
+    /// `Ctrl+s`: confirm applying the pending changes; on production the
+    /// connection name must be typed. `script`: hand-edited SQL.
+    ConfirmApply {
+        script: Option<String>,
+        production: bool,
+        input: LineInput,
+        counts: crate::db::changes::ChangeCounts,
+        /// Overlay to restore on cancel (the diff view).
+        previous: Option<Box<Overlay>>,
+    },
+    /// `Ctrl+z` / `X`: confirm discarding the pending changes.
+    ConfirmDiscard,
+    /// Leaving the table with pending changes.
+    PendingChanges(edit::After),
 }
 
 impl Overlay {
@@ -273,6 +301,10 @@ pub struct App {
     pub back_stack: Vec<ObjectRef>,
     pub data: DataView,
     request_seq: u64,
+    /// Action postponed until the pending changes are applied.
+    after_apply: Option<edit::After>,
+    /// What each change of the apply in flight refers to.
+    apply_origins: Vec<staging::Origin>,
 
     pub overlay: Option<Overlay>,
     pub status: Option<StatusMessage>,
@@ -329,6 +361,8 @@ impl App {
             back_stack: Vec::new(),
             data: DataView::default(),
             request_seq: 0,
+            after_apply: None,
+            apply_origins: Vec::new(),
             overlay: None,
             status: None,
             busy: None,
@@ -369,6 +403,10 @@ impl App {
             Some(Overlay::Command(_)) => Mode::Command,
             Some(Overlay::DataSearch { .. }) => Mode::Search,
             Some(Overlay::FilterEditor(_) | Overlay::FreeWhere(_)) => Mode::Filter,
+            Some(Overlay::CellEditor(e)) => match e.target {
+                edit::EditTarget::Insert(_) => Mode::Insert,
+                edit::EditTarget::Existing(_) => Mode::Edit,
+            },
             _ if self.tree.filter_editing => Mode::Filter,
             _ if self.tab == Tab::Data && self.focus == Focus::Center => match self.data.visual {
                 Some(v) if v.line => Mode::VisualLine,
@@ -593,6 +631,11 @@ impl App {
             Some(Overlay::Login(_)) => return self.on_login_key(key),
             Some(Overlay::SaveServer(_)) => return self.on_save_server_key(key),
             Some(Overlay::ConfirmDelete(_)) => return self.on_confirm_delete_key(key),
+            Some(Overlay::CellEditor(_)) => return self.on_cell_editor_key(key),
+            Some(Overlay::Changes(_)) => return self.on_changes_key(key),
+            Some(Overlay::ConfirmApply { .. }) => return self.on_confirm_apply_key(key),
+            Some(Overlay::ConfirmDiscard) => return self.on_confirm_discard_key(key),
+            Some(Overlay::PendingChanges(_)) => return self.on_pending_changes_key(key),
             _ => {}
         }
         if self.overlay.as_ref().is_some_and(Overlay::is_data) {
@@ -624,7 +667,12 @@ impl App {
             | Overlay::RowDetail { .. }
             | Overlay::Login(_)
             | Overlay::SaveServer(_)
-            | Overlay::ConfirmDelete(_) => Vec::new(),
+            | Overlay::ConfirmDelete(_)
+            | Overlay::CellEditor(_)
+            | Overlay::Changes(_)
+            | Overlay::ConfirmApply { .. }
+            | Overlay::ConfirmDiscard
+            | Overlay::PendingChanges(_) => Vec::new(),
             Overlay::Error { .. } => {
                 if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) {
                     self.overlay = None;
@@ -670,7 +718,11 @@ impl App {
         match action {
             // On the connections page, `q` / Esc go back to the tree.
             Quit | Cancel if self.screen == Screen::Picker => self.screen = Screen::Main,
-            Quit => self.should_quit = true,
+            Quit => {
+                if !self.guard(edit::After::Quit) {
+                    self.should_quit = true;
+                }
+            }
             ConnectionsPage => {
                 self.screen = Screen::Picker;
                 return self.discover();
@@ -718,18 +770,25 @@ impl App {
         match action {
             NextSection => self.schema.cycle_section(1),
             PrevSection => self.schema.cycle_section(-1),
-            JumpBack => match self.back_stack.pop() {
-                Some(prev) => self.go_to(prev),
+            JumpBack => match self.back_stack.last() {
+                Some(_) => {
+                    if !self.guard(edit::After::Back) {
+                        let prev = self.back_stack.pop().expect("checked above");
+                        self.go_to(prev);
+                    }
+                }
                 None => self.notify(Level::Info, "Pas d'objet précédent"),
             },
             FollowLink => {
                 let target = self.schema.table().and_then(|t| t.selected_link()).cloned();
                 match target {
                     Some(t) => {
-                        if let Some(cur) = self.current.take() {
-                            self.back_stack.push(cur);
+                        if !self.guard(edit::After::Follow(t.clone())) {
+                            if let Some(cur) = self.current.take() {
+                                self.back_stack.push(cur);
+                            }
+                            self.go_to(t);
                         }
-                        self.go_to(t);
                     }
                     None => {
                         if matches!(
@@ -948,6 +1007,9 @@ impl App {
     }
 
     fn open_object(&mut self, obj: ObjectRef) {
+        if self.guard(edit::After::Open(obj.clone())) {
+            return;
+        }
         if !obj.kind.has_rows() && self.tab == Tab::Data {
             self.tab = Tab::Schema;
         }
@@ -975,7 +1037,12 @@ impl App {
         let arg = parts.next();
         let current = self.current_server().map(|s| s.name().to_string());
         match cmd {
-            "q" | "quit" | "q!" | "quit!" | "qa" | "qa!" => self.should_quit = true,
+            "q!" | "quit!" | "qa!" => self.should_quit = true,
+            "q" | "quit" | "qa" => {
+                if !self.guard(edit::After::Quit) {
+                    self.should_quit = true;
+                }
+            }
             "h" | "help" => self.overlay = Some(Overlay::Help { scroll: 0 }),
             "reload" | "refresh" => return self.reload_catalog(),
             "connections" | "conn" => {
@@ -1033,6 +1100,9 @@ impl App {
             | DbEvent::CountFailed { .. }) => {
                 self.on_data_event(ev);
                 Vec::new()
+            }
+            ev @ (DbEvent::ChangesApplied { .. } | DbEvent::ChangesFailed { .. }) => {
+                self.on_apply_event(ev)
             }
             DbEvent::Discovered(servers) => {
                 self.on_discovered(servers);

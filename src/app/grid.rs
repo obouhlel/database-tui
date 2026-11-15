@@ -21,6 +21,12 @@ pub enum CellStyle {
     Link,
     Accent,
     Warning,
+    /// Staged changes (Data tab).
+    Modified,
+    Inserted,
+    Deleted,
+    /// Staged change on a row that changed in the database.
+    Conflict,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
