@@ -5,16 +5,20 @@
 //! clipboard writes) that the event loop executes. It performs no I/O, which
 //! keeps it unit-testable.
 
+pub mod completion;
 mod data_tab;
 pub mod data_view;
 pub mod discovery;
 pub mod edit;
 pub mod editor;
 pub mod export;
+pub mod export_dialog;
 pub mod filter_editor;
 pub mod format;
 pub mod grid;
 pub mod input;
+pub mod palette;
+pub mod plan;
 pub mod schema_view;
 pub mod server;
 mod servers;
@@ -73,6 +77,13 @@ pub enum Effect {
     DeleteConnection(String),
     /// Append a statement to the history file.
     AppendHistory(Box<sql_tab::HistoryEntry>),
+    /// Write an export built in memory (SQL results).
+    WriteFile {
+        path: PathBuf,
+        text: String,
+        /// Success message.
+        done: String,
+    },
     /// Saved queries (`<data dir>/queries/<name>.sql`).
     SaveQuery {
         name: String,
@@ -267,6 +278,8 @@ pub enum Overlay {
         names: Vec<String>,
         cursor: usize,
     },
+    /// `E`: export to a file.
+    Export(Box<export_dialog::ExportDialog>),
 }
 
 impl Overlay {
@@ -325,6 +338,10 @@ pub struct App {
     pub config_path: Option<PathBuf>,
     /// History and saved queries live here.
     pub data_dir: Option<PathBuf>,
+    /// Default directory of exports (the working directory).
+    pub export_dir: Option<PathBuf>,
+    /// Id of the export in flight.
+    exporting: Option<u64>,
     /// Config / keymap warnings shown in the picker.
     pub warnings: Vec<String>,
 
@@ -338,6 +355,14 @@ pub struct App {
     pub back_stack: Vec<ObjectRef>,
     pub data: DataView,
     request_seq: u64,
+    /// The overlay belongs to the active SQL result (see `with_results`).
+    pub overlay_in_results: bool,
+    /// The apply in flight comes from this SQL result.
+    apply_in_results: Option<usize>,
+    /// Reload a SQL result after applying its changes.
+    rerun_results: bool,
+    /// Suggestion chosen in the command palette (`None`: the typed text).
+    pub palette_cursor: Option<usize>,
     /// Action postponed until the pending changes are applied.
     after_apply: Option<edit::After>,
     /// What each change of the apply in flight refers to.
@@ -404,6 +429,10 @@ impl App {
             data: DataView::default(),
             request_seq: 0,
             after_apply: None,
+            palette_cursor: None,
+            overlay_in_results: false,
+            apply_in_results: None,
+            rerun_results: false,
             apply_origins: Vec::new(),
             results_mode: false,
             overlay: None,
@@ -419,6 +448,8 @@ impl App {
             login: None,
             config_path: None,
             data_dir: None,
+            export_dir: None,
+            exporting: None,
         }
     }
 
@@ -712,6 +743,13 @@ impl App {
     }
 
     fn on_overlay_key(&mut self, key: KeyEvent) -> Vec<Effect> {
+        // Overlays opened on a SQL result work on that result.
+        if self.overlay_in_results && !self.results_mode {
+            if let Some(effects) = self.with_results(|app| app.on_overlay_key(key)) {
+                return effects;
+            }
+            self.overlay_in_results = false;
+        }
         match &self.overlay {
             Some(Overlay::Login(_)) => return self.on_login_key(key),
             Some(Overlay::SaveServer(_)) => return self.on_save_server_key(key),
@@ -739,6 +777,7 @@ impl App {
             Some(Overlay::ConfirmTxnExit(_)) => return self.on_confirm_txn_exit_key(key),
             Some(Overlay::HistorySearch(_)) => return self.on_history_key(key),
             Some(Overlay::QueryList { .. }) => return self.on_query_list_key(key),
+            Some(Overlay::Export(_)) => return self.on_export_key(key),
             _ => {}
         }
         let Some(overlay) = self.overlay.as_mut() else {
@@ -776,28 +815,65 @@ impl App {
             | Overlay::ConfirmWrites { .. }
             | Overlay::ConfirmTxnExit(_)
             | Overlay::HistorySearch(_)
-            | Overlay::QueryList { .. } => Vec::new(),
+            | Overlay::QueryList { .. }
+            | Overlay::Export(_) => Vec::new(),
             Overlay::Error { .. } => {
                 if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) {
                     self.overlay = None;
                 }
                 Vec::new()
             }
-            Overlay::Command(input) => match input.handle_key(&key) {
-                InputOutcome::Submit => {
-                    let line = input.text().trim().to_string();
-                    self.overlay = None;
-                    self.run_command(&line)
-                }
-                InputOutcome::Cancel => {
-                    self.overlay = None;
+            Overlay::Command(input) => match key.code {
+                KeyCode::Down => {
+                    self.palette_cursor = Some(self.palette_cursor.map_or(0, |c| c + 1));
                     Vec::new()
                 }
-                _ if key.code == KeyCode::Backspace && input.is_empty() => {
-                    self.overlay = None;
+                KeyCode::Up => {
+                    self.palette_cursor = self.palette_cursor.and_then(|c| c.checked_sub(1));
                     Vec::new()
                 }
-                _ => Vec::new(),
+                KeyCode::Tab => {
+                    let text = input.text().to_string();
+                    let chosen = self
+                        .palette_matches(&text)
+                        .into_iter()
+                        .nth(self.palette_cursor.unwrap_or(0));
+                    if let Some(palette::PaletteEntry {
+                        target: palette::PaletteTarget::Command { name, arg },
+                        ..
+                    }) = chosen
+                        && let Some(Overlay::Command(input)) = &mut self.overlay
+                    {
+                        *input = LineInput::with_text(if arg {
+                            format!("{name} ")
+                        } else {
+                            name.to_string()
+                        });
+                        self.palette_cursor = None;
+                    }
+                    Vec::new()
+                }
+                _ => match input.handle_key(&key) {
+                    InputOutcome::Submit => {
+                        let line = input.text().trim().to_string();
+                        self.overlay = None;
+                        let cursor = self.palette_cursor.take();
+                        self.run_palette(&line, cursor)
+                    }
+                    InputOutcome::Changed => {
+                        self.palette_cursor = None;
+                        Vec::new()
+                    }
+                    InputOutcome::Cancel => {
+                        self.overlay = None;
+                        Vec::new()
+                    }
+                    _ if key.code == KeyCode::Backspace && input.is_empty() => {
+                        self.overlay = None;
+                        Vec::new()
+                    }
+                    _ => Vec::new(),
+                },
             },
             Overlay::Password { conn, input, .. } => match input.handle_key(&key) {
                 InputOutcome::Submit => {
@@ -832,7 +908,10 @@ impl App {
                 return self.discover();
             }
             Help => self.overlay = Some(Overlay::Help { scroll: 0 }),
-            CommandPalette => self.overlay = Some(Overlay::Command(LineInput::default())),
+            CommandPalette => {
+                self.palette_cursor = None;
+                self.overlay = Some(Overlay::Command(LineInput::default()));
+            }
             Interrupt => {
                 if let Some(effects) = self.cancel_sql() {
                     return effects;
@@ -1195,7 +1274,12 @@ impl App {
             "schema" => self.tab = Tab::Schema,
             "data" => self.tab = Tab::Data,
             "sql" => self.switch_tab(Tab::Sql),
-            other => self.notify(Level::Error, format!("Commande inconnue : {other}")),
+            other => self.notify(
+                Level::Error,
+                format!(
+                    "Commande inconnue : {other} (Up/Down et Entrée pour choisir une suggestion)"
+                ),
+            ),
         }
         Vec::new()
     }
@@ -1230,9 +1314,24 @@ impl App {
             ev @ (DbEvent::ChangesApplied { .. } | DbEvent::ChangesFailed { .. }) => {
                 self.on_apply_event(ev)
             }
-            ev @ (DbEvent::StatementDone { .. } | DbEvent::StatementFailed { .. }) => {
-                self.on_sql_event(ev)
+            DbEvent::CompletionLoaded {
+                connection,
+                database,
+                columns,
+                search_path,
+            } => {
+                self.on_completion_loaded(connection, database, columns, search_path);
+                Vec::new()
             }
+            ev @ (DbEvent::ExportProgress { .. }
+            | DbEvent::ExportDone { .. }
+            | DbEvent::ExportFailed { .. }) => {
+                self.on_export_event(ev);
+                Vec::new()
+            }
+            ev @ (DbEvent::StatementDone { .. }
+            | DbEvent::StatementFailed { .. }
+            | DbEvent::Explained { .. }) => self.on_sql_event(ev),
             DbEvent::Discovered(servers) => {
                 self.on_discovered(servers);
                 Vec::new()

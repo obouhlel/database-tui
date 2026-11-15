@@ -173,6 +173,10 @@ actions! {
     ShowChanges => "show_changes", "Changements en attente (diff, SQL généré)";
     ApplyChanges => "apply_changes", "Appliquer les changements (une transaction)";
     DiscardChanges => "discard_changes", "Abandonner tous les changements";
+    Export => "export", "Exporter le résultat (CSV, TSV, JSON, INSERT)";
+    Explain => "explain", "EXPLAIN de l'instruction sous le curseur";
+    ExplainAnalyze => "explain_analyze", "EXPLAIN ANALYZE (exécutée puis annulée)";
+    Complete => "complete", "Compléter (mots-clés, tables, colonnes, fonctions)";
     ExecuteStatement => "execute_statement", "Exécuter l'instruction sous le curseur (ou la sélection)";
     ExecuteScript => "execute_script", "Exécuter tout le script";
     HistorySearch => "history_search", "Rechercher dans l'historique";
@@ -265,6 +269,7 @@ fn defaults() -> Vec<(Context, Action, &'static [&'static str])> {
         (Data, HideColumn, &["-"]),
         (Data, ShowColumns, &["+"]),
         (Data, Refresh, &["R"]),
+        (Data, Export, &["E"]),
         (Data, EditCell, &["e", "i"]),
         (Data, InsertRow, &["o"]),
         (Data, DeleteRow, &["dd"]),
@@ -280,6 +285,11 @@ fn defaults() -> Vec<(Context, Action, &'static [&'static str])> {
         ),
         (SqlEditor, ExecuteScript, &["ctrl+shift+enter", "f5"]),
         (SqlEditor, HistorySearch, &["ctrl+r"]),
+        (SqlEditor, Complete, &["ctrl+space", "ctrl+n"]),
+        (SqlEditor, Explain, &["f6"]),
+        (SqlEditor, ExplainAnalyze, &["f7"]),
+        (SqlResults, Explain, &["f6"]),
+        (SqlResults, ExplainAnalyze, &["f7"]),
         (SqlEditor, FocusResults, &["ctrl+j"]),
         (SqlResults, FocusEditor, &["i", "ctrl+k"]),
         (SqlResults, NextResult, &["]"]),

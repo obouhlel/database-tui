@@ -1,4 +1,6 @@
-//! Text formats for copying rows: TSV, CSV, JSON, INSERT statements.
+//! Text formats for copying and exporting rows: TSV, CSV, JSON, INSERT
+//! statements. Exports are written in chunks ([`render_chunk`], [`finish`])
+//! so that a large table never sits in memory.
 
 use serde_json::{Map, Value as Json};
 
@@ -30,6 +32,16 @@ impl CopyFormat {
         }
     }
 
+    /// File extension for exports.
+    pub fn extension(self) -> &'static str {
+        match self {
+            CopyFormat::Tsv => "tsv",
+            CopyFormat::Csv => "csv",
+            CopyFormat::Json => "json",
+            CopyFormat::Insert => "sql",
+        }
+    }
+
     /// Single-key shortcut in the format chooser.
     pub fn key(self) -> char {
         match self {
@@ -38,6 +50,42 @@ impl CopyFormat {
             CopyFormat::Json => 'j',
             CopyFormat::Insert => 'i',
         }
+    }
+}
+
+/// What an export of the Data tab writes: the visible columns (index in
+/// the request, name, kind), in display order.
+#[derive(Debug, Clone)]
+pub struct ExportSpec {
+    pub format: CopyFormat,
+    pub path: std::path::PathBuf,
+    pub columns: Vec<(usize, String, ValueKind)>,
+    pub schema: String,
+    pub table: String,
+}
+
+impl ExportSpec {
+    /// The chunk for a page of rows.
+    pub fn chunk(&self, rows: &[Vec<Option<String>>], first: bool) -> String {
+        let e = Extract {
+            schema: &self.schema,
+            table: &self.table,
+            columns: self
+                .columns
+                .iter()
+                .map(|(_, n, k)| (n.as_str(), *k))
+                .collect(),
+            rows: rows
+                .iter()
+                .map(|r| {
+                    self.columns
+                        .iter()
+                        .map(|(i, _, _)| r.get(*i).and_then(|v| v.as_deref()))
+                        .collect()
+                })
+                .collect(),
+        };
+        render_chunk(self.format, &e, first)
     }
 }
 
@@ -55,6 +103,57 @@ pub fn render(fmt: CopyFormat, e: &Extract, header: bool) -> String {
         CopyFormat::Csv => delimited(e, b',', header),
         CopyFormat::Json => json(e),
         CopyFormat::Insert => insert(e),
+    }
+}
+
+/// One chunk of an export file; `first` for the first chunk (header,
+/// opening bracket). Ends with a newline when not empty.
+pub fn render_chunk(fmt: CopyFormat, e: &Extract, first: bool) -> String {
+    match fmt {
+        CopyFormat::Tsv | CopyFormat::Csv => {
+            if e.rows.is_empty() && !first {
+                return String::new();
+            }
+            let d = if fmt == CopyFormat::Tsv { b'\t' } else { b',' };
+            let mut s = delimited(e, d, first);
+            if !s.is_empty() {
+                s.push('\n');
+            }
+            s
+        }
+        CopyFormat::Json => {
+            let mut s = String::new();
+            if first {
+                s.push('[');
+            }
+            for (i, row) in e.rows.iter().enumerate() {
+                let mut obj = Map::new();
+                for ((name, kind), v) in e.columns.iter().zip(row) {
+                    obj.insert((*name).to_string(), json_value(*kind, *v));
+                }
+                if !(first && i == 0) {
+                    s.push(',');
+                }
+                s.push_str("\n  ");
+                s.push_str(&serde_json::to_string(&Json::Object(obj)).unwrap_or_default());
+            }
+            s
+        }
+        CopyFormat::Insert => {
+            let mut s = insert(e);
+            if !s.is_empty() {
+                s.push('\n');
+            }
+            s
+        }
+    }
+}
+
+/// End of an export file.
+pub fn finish(fmt: CopyFormat) -> &'static str {
+    match fmt {
+        CopyFormat::Json => "\n]\n",
+        _ => "",
     }
 }
 
@@ -182,6 +281,40 @@ mod tests {
         assert_eq!(v[0]["data"]["k"], Json::from(1));
         assert_eq!(v[0]["total"], Json::String("10.50".into()));
         assert_eq!(v[1]["note"], Json::Null);
+    }
+
+    #[test]
+    fn chunks_make_valid_files() {
+        let e = sample();
+        for fmt in CopyFormat::ALL {
+            let mut out = render_chunk(fmt, &e, true);
+            out.push_str(&render_chunk(fmt, &e, false));
+            out.push_str(finish(fmt));
+            match fmt {
+                CopyFormat::Json => {
+                    let v: Json = serde_json::from_str(&out).unwrap();
+                    assert_eq!(v.as_array().unwrap().len(), 4);
+                }
+                CopyFormat::Csv | CopyFormat::Tsv => {
+                    // Header once, 4 records (one has an embedded tab, quoted).
+                    let mut r = csv::ReaderBuilder::new()
+                        .delimiter(if fmt == CopyFormat::Tsv { b'\t' } else { b',' })
+                        .from_reader(out.as_bytes());
+                    assert_eq!(r.headers().unwrap().len(), 5);
+                    assert_eq!(r.records().count(), 4);
+                }
+                CopyFormat::Insert => assert_eq!(out.lines().count(), 4),
+            }
+        }
+        let empty = Extract {
+            rows: vec![],
+            ..sample()
+        };
+        let json = render_chunk(CopyFormat::Json, &empty, true) + finish(CopyFormat::Json);
+        assert_eq!(
+            serde_json::from_str::<Json>(&json).unwrap(),
+            Json::Array(vec![])
+        );
     }
 
     #[test]

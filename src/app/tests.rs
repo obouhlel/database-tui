@@ -360,6 +360,31 @@ fn command_line() {
 }
 
 #[test]
+fn palette_runs_a_chosen_action() {
+    let mut app = connected_app();
+    key(&mut app, "ctrl+p");
+    typed(&mut app, "help");
+    let m = app.palette_matches("help");
+    assert_eq!(m[0].label, "help");
+    key(&mut app, "down");
+    key(&mut app, "enter");
+    assert!(matches!(app.overlay, Some(Overlay::Help { .. })));
+    key(&mut app, "esc");
+    // Tab completes a command that takes an argument.
+    key(&mut app, ":");
+    typed(&mut app, "conne");
+    key(&mut app, "down tab");
+    match &app.overlay {
+        Some(Overlay::Command(i)) => assert!(
+            i.text() == "connect " || i.text() == "connections",
+            "{}",
+            i.text()
+        ),
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
 fn ctrl_c_does_not_quit() {
     let mut app = connected_app();
     key(&mut app, "ctrl+c");
@@ -882,6 +907,36 @@ mod data_tab {
     }
 
     #[test]
+    fn export_the_whole_query() {
+        let mut app = data_app(1000);
+        app.export_dir = Some("/tmp/x".into());
+        key(&mut app, "E");
+        let Some(Overlay::Export(d)) = &app.overlay else {
+            panic!("export dialog expected");
+        };
+        assert!(d.path.text().starts_with("/tmp/x/orders-") && d.path.text().ends_with(".csv"));
+        key(&mut app, "down");
+        let Some(Overlay::Export(d)) = &app.overlay else {
+            panic!("export dialog expected");
+        };
+        assert!(
+            d.path.text().ends_with(".json"),
+            "the extension follows the format"
+        );
+        let effects = key_effects(&mut app, "enter");
+        match db(effects).as_slice() {
+            [DbCommand::Export { request, spec, .. }] => {
+                assert_eq!(request.object.name, "orders");
+                assert_eq!(spec.format, crate::app::export::CopyFormat::Json);
+                let cols: Vec<&str> = spec.columns.iter().map(|c| c.1.as_str()).collect();
+                assert_eq!(cols, ["id", "status"]);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(app.busy.is_some());
+    }
+
+    #[test]
     fn read_only_tables_refuse_edits() {
         let mut app = data_app(10);
         app.data.read_only_reason = Some("connexion en lecture seule".into());
@@ -1086,6 +1141,7 @@ mod sql {
             truncated: false,
             row_count: n as u64,
             returns_rows: true,
+            source: None,
         }
     }
 
@@ -1252,6 +1308,24 @@ mod sql {
     }
 
     #[test]
+    fn export_a_result_from_memory() {
+        let mut app = sql_app();
+        write(&mut app, "select n");
+        let ex = executed(&key_effects(&mut app, "ctrl+e"));
+        done(&mut app, ex[0].0, rows_result(3));
+        key(&mut app, "ctrl+j E");
+        assert!(matches!(app.overlay, Some(Overlay::Export(_))));
+        let effects = key_effects(&mut app, "enter");
+        match effects.as_slice() {
+            [Effect::WriteFile { path, text, .. }] => {
+                assert!(path.to_string_lossy().ends_with(".csv"));
+                assert_eq!(text, "n\n0\n1\n2\n");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
     fn history_search_inserts_a_statement() {
         let mut app = sql_app();
         for q in [
@@ -1305,6 +1379,119 @@ mod sql {
         });
         assert_eq!(app.sql.editor.lines().len(), 2);
         assert_eq!(app.sql.file.as_deref(), Some("autre"));
+    }
+
+    #[test]
+    fn completion_popup() {
+        let mut app = sql_app();
+        write(&mut app, "select * from cu");
+        let effects = key_effects(&mut app, "ctrl+space");
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            Effect::Db(DbCommand::LoadCompletion { connection, database, .. })
+                if connection == "local" && database == "demo"
+        )));
+        let labels: Vec<_> = app
+            .sql
+            .popup
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .map(|c| c.insert.clone())
+            .collect();
+        assert_eq!(labels, ["customers"]);
+        key(&mut app, "enter");
+        assert_eq!(app.sql.editor.text(), "select * from customers");
+        assert!(app.sql.popup.is_none());
+
+        app.update(Msg::Db(DbEvent::CompletionLoaded {
+            connection: "local".into(),
+            database: "demo".into(),
+            columns: ["id", "email", "name"]
+                .iter()
+                .map(|n| crate::sql::complete::Column {
+                    schema: "public".into(),
+                    table: "customers".into(),
+                    name: n.to_string(),
+                    data_type: "text".into(),
+                })
+                .collect(),
+            search_path: vec!["public".into()],
+        }));
+        write(&mut app, " c where c.");
+        // Columns load only once.
+        assert!(db(key_effects(&mut app, "ctrl+space")).is_empty());
+        assert_eq!(app.sql.popup.as_ref().unwrap().items.len(), 3);
+        // Typing narrows the list, Esc closes it, Tab accepts.
+        write(&mut app, "e");
+        assert_eq!(app.sql.popup.as_ref().unwrap().items.len(), 1);
+        key(&mut app, "tab");
+        assert!(app.sql.editor.text().ends_with("c.email"));
+        write(&mut app, " = ");
+        assert!(app.sql.popup.is_none());
+    }
+
+    #[test]
+    fn editable_result_applies_then_reruns() {
+        let mut app = sql_app();
+        write(&mut app, "select id, name from shop.items");
+        let ex = executed(&key_effects(&mut app, "ctrl+e"));
+        let mut r = StatementResult {
+            columns: ["id", "name"]
+                .iter()
+                .map(|n| ResultColumn {
+                    name: n.to_string(),
+                    data_type: if *n == "id" { "int4" } else { "text" }.into(),
+                })
+                .collect(),
+            rows: vec![
+                vec![Some("1".into()), Some("a".into())],
+                vec![Some("2".into()), None],
+            ],
+            row_count: 2,
+            returns_rows: true,
+            ..Default::default()
+        };
+        r.source = Some(crate::db::exec::ResultSource {
+            schema: "shop".into(),
+            table: "items".into(),
+            key: vec!["id".into()],
+        });
+        done(&mut app, ex[0].0, r);
+        key(&mut app, "ctrl+j l e ctrl+u");
+        assert_eq!(app.mode(), Mode::Edit);
+        write(&mut app, "b\n");
+        assert_eq!(app.pending_changes().map(|c| c.updated), Some(1));
+        // No new run while edits are pending.
+        key(&mut app, "i");
+        assert!(executed(&key_effects(&mut app, "ctrl+e")).is_empty());
+        key(&mut app, "ctrl+j ctrl+s");
+        assert!(matches!(app.overlay, Some(Overlay::ConfirmApply { .. })));
+        let effects = key_effects(&mut app, "o");
+        let (id, set) = effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::Db(DbCommand::ApplyChanges { id, set }) => Some((*id, set.clone())),
+                _ => None,
+            })
+            .expect("apply");
+        assert_eq!(
+            (set.object.schema.as_str(), set.object.name.as_str()),
+            ("shop", "items")
+        );
+        assert_eq!(set.columns[0].data_type, "int4");
+        let effects = app.update(Msg::Db(DbEvent::ChangesApplied {
+            id,
+            counts: Some(set.counts()),
+            elapsed: Duration::ZERO,
+        }));
+        let ex = executed(&effects);
+        assert_eq!(ex.len(), 1, "the statement runs again: {effects:?}");
+        assert_eq!(ex[0].1, "select id, name from shop.items");
+        assert!(app.pending_changes().is_none());
+        // The Data tab is untouched.
+        assert!(app.data.object.is_none());
     }
 
     #[test]

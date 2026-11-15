@@ -2,8 +2,8 @@
 
 Client PostgreSQL en mode texte (TUI), entièrement pilotable au clavier — une alternative légère à DBeaver pour l'usage quotidien.
 
-> **État : jalon 5 / 6** — arbre des connexions (plusieurs ouvertes à la fois), onglet Schema, onglet Data (pagination serveur, tri, filtres, recherche, détail, copie, édition avec staging, diff, commit transactionnel et détection de conflits) et onglet SQL (éditeur classique ou vim, exécution, résultats, transactions manuelles, historique, requêtes enregistrées).
-> Autocomplétion, EXPLAIN et export arrivent au dernier jalon (voir [Feuille de route](#feuille-de-route)).
+> **État : jalons 1 à 6 terminés** — arbre des connexions (plusieurs ouvertes à la fois), onglet Schema, onglet Data (pagination serveur, tri, filtres, recherche, détail, copie, édition avec staging, diff, commit transactionnel et détection de conflits) et onglet SQL (éditeur classique ou vim, exécution, résultats, transactions manuelles, historique, requêtes enregistrées).
+> Plus autocomplétion, EXPLAIN / EXPLAIN ANALYZE, export, résultats SQL modifiables et palette de commandes (voir [Feuille de route](#feuille-de-route)).
 
 ## Captures
 
@@ -18,6 +18,8 @@ Client PostgreSQL en mode texte (TUI), entièrement pilotable au clavier — une
 | ![SQL généré](docs/screenshots/24-sql-genere.png) | ![Conflit détecté](docs/screenshots/26-conflit.png) |
 | ![Onglet SQL : résultat](docs/screenshots/30-sql-resultat.png) | ![Onglet SQL : transaction manuelle](docs/screenshots/34-sql-transaction.png) |
 | ![Onglet SQL : erreur positionnée](docs/screenshots/31-sql-erreur.png) | ![Onglet SQL : historique](docs/screenshots/32-sql-historique.png) |
+| ![EXPLAIN ANALYZE](docs/screenshots/35-explain.png) | ![Autocomplétion](docs/screenshots/36-completion.png) |
+| ![Résultat SQL modifiable](docs/screenshots/37-resultat-modifiable.png) | ![Export](docs/screenshots/39-export.png) |
 | ![Plusieurs connexions ouvertes](docs/screenshots/19-multi-connexions.png) | ![Page des connexions](docs/screenshots/01-selecteur.png) |
 
 Captures du vrai binaire, régénérables avec `scripts/screenshots/capture.sh` (tmux, Python, Node + Playwright, base de démo lancée).
@@ -100,7 +102,17 @@ Rien n'est écrit en base tant que vous n'avez pas validé : chaque modification
 - **Garde-fou** : un `UPDATE` ou un `DELETE` sans `WHERE` (hors sous-requêtes) demande une confirmation explicite avant l'exécution.
 - **Historique** persistant dans `~/.local/share/pgtui/history` (une ligne JSON par instruction : date, connexion, base, texte, succès, durée ; fichier en mode 600 ; 5 000 entrées). `Ctrl+r` (ou `:history`) ouvre une recherche floue, avec aperçu ; `Entrée` insère l'instruction dans l'éditeur.
 - **Requêtes enregistrées** dans `~/.local/share/pgtui/queries/<nom>.sql` : `:save <nom>` (ou `:w`, sans nom pour réenregistrer), `:open <nom>` (ou `:e`), `:open` seul pour choisir dans la liste.
-- Non encore fait : rendre éditables les résultats d'un `SELECT` sur une seule table (prévu avec les finitions du jalon 6).
+- **Autocomplétion** (`Ctrl+Espace` ou `Ctrl+n`) selon le contexte : après `FROM`, `JOIN`, `UPDATE`, `INTO`, les tables et vues (qualifiées hors du `search_path`) et les schémas ; après `alias.` ou `table.`, les colonnes de cette table (alias résolus dans l'instruction courante) ; après `schéma.`, ses objets et fonctions ; ailleurs, les colonnes des tables de l'instruction, puis les mots-clés, fonctions et tables. La liste suit la frappe ; `Tab` ou `Entrée` insère, `Esc` ferme. Les colonnes de la base sont chargées une fois, à la première demande, par la connexion de catalogue.
+- **EXPLAIN** : `F6` affiche le plan estimé de l'instruction sous le curseur, `F7` le plan réel (`EXPLAIN ANALYZE, BUFFERS`). Le plan est un arbre : coût, lignes estimées et réelles, durée, boucles, conditions, tri, lignes écartées par les filtres, et la part du travail propre à chaque nœud (en rouge au-delà de 30 %). Une estimation fausse d'un facteur 10 est signalée. `EXPLAIN ANALYZE` exécute l'instruction dans une transaction annulée (ou un savepoint si une transaction est ouverte) : un `UPDATE` analysé ne modifie rien. `y` copie le plan en texte.
+- **Résultats modifiables** : quand toutes les colonnes d'un `SELECT` viennent telles quelles d'une seule table (sans alias de colonne, sans expression) et que sa clé primaire en fait partie, le résultat s'édite comme l'onglet Data : `e`, `o`, `dd`, `u`, `D`, `Ctrl+s`, avec la même transaction unique et la même détection de conflits. L'instruction est relancée après l'application. La barre des résultats indique « modifiable (schéma.table) ». La table est reconnue grâce aux métadonnées du protocole (OID de la table d'origine de chaque colonne).
+
+## Export
+
+`E` dans l'onglet Data ou sur un résultat SQL ouvre l'export : format (CSV, TSV, JSON, INSERT SQL, `Up`/`Down`) et chemin (par défaut `<répertoire courant>/<table>-<date>.<ext>`, `~/` accepté). Dans l'onglet Data, c'est **toute la requête** qui est exportée (filtres et tri compris, toutes les lignes, pas seulement celles chargées) : le worker la relit par pages de 5 000 lignes et écrit au fur et à mesure, sans tout charger en mémoire ; la barre de statut affiche la progression. Pour un résultat SQL, ce sont les lignes du résultat. Seules les colonnes visibles sont exportées, dans l'ordre affiché ; en JSON, les nombres, booléens et JSON gardent leur type.
+
+## Palette de commandes
+
+`:` ou `Ctrl+p` ouvre la ligne de commande avec des suggestions floues : les commandes (`quit`, `connect <nom>`, `save <nom>`…) et les actions du contexte courant, avec leurs raccourcis. `Up`/`Down` choisit, `Tab` complète, `Entrée` exécute la suggestion choisie (ou, sans choix, la commande tapée, pour qu'une faute de frappe ne lance jamais autre chose).
 
 ## Lancement
 
@@ -254,9 +266,12 @@ Couleurs : noms (`red`, `light-blue`, `orange`…), `#rrggbb` ou index ANSI (`20
 | | `y`, `yy`, `Y` | Copier la cellule (ou la sélection), la ligne, ou la sélection au choix TSV / CSV / JSON / INSERT |
 | | `<` / `>` / `=`, `-` / `+` | Rétrécir / élargir / largeur auto, masquer la colonne / tout réafficher |
 | | `R`, `Ctrl+c` | Relancer la requête, annuler une requête en cours |
+| | `E` | Exporter (CSV, TSV, JSON, INSERT) |
 | Onglet SQL | `Ctrl+Entrée` · `Ctrl+e` · `Alt+Entrée` | Exécuter l'instruction sous le curseur (ou la sélection) |
 | | `Ctrl+Shift+Entrée` · `F5` | Exécuter tout le script |
 | | `Ctrl+r` | Historique (recherche floue) |
+| | `Ctrl+Espace` · `Ctrl+n` | Autocomplétion |
+| | `F6` / `F7` | EXPLAIN / EXPLAIN ANALYZE |
 | | `Ctrl+j` · `Esc` (classique) / `i` · `Ctrl+k` | Aller aux résultats / revenir à l'éditeur |
 | | `[` / `]` | Résultat précédent / suivant |
 | | `Ctrl+c` | Annuler la requête en cours |
@@ -326,7 +341,7 @@ Sans `PGTUI_TEST_DATABASE_URL`, les tests d'intégration sont ignorés avec un m
 - [x] **Jalon 3** — onglet Data en lecture : tableau virtualisé, pagination serveur, tri, recherche, filtres, vue détail, copie
 - [x] **Jalon 4** — édition, staging, vue diff, commit transactionnel, détection de conflits
 - [x] **Jalon 5** — onglet SQL : éditeur, exécution, résultats, historique, annulation, transactions manuelles
-- [ ] **Jalon 6** — autocomplétion, EXPLAIN, export, finitions
+- [x] **Jalon 6** — autocomplétion, EXPLAIN / EXPLAIN ANALYZE, export, résultats SQL modifiables, palette de commandes
 
 ## Licence
 

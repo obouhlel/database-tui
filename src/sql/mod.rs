@@ -1,5 +1,6 @@
 //! Engine-agnostic SQL helpers: identifier/literal quoting and a lexer.
 
+pub mod complete;
 pub mod ident;
 pub mod lexer;
 pub mod script;

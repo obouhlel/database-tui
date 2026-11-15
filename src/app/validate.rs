@@ -6,7 +6,7 @@ use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 
 /// `Err(message)` if `value` cannot be a `data_type`.
 pub fn validate(data_type: &str, value: &str) -> Result<(), String> {
-    let t = data_type.trim();
+    let t = engine_alias(data_type.trim());
     if t.ends_with("[]") {
         return array(value);
     }
@@ -30,6 +30,22 @@ pub fn validate(data_type: &str, value: &str) -> Result<(), String> {
         b if b.starts_with("timestamp") => timestamp(v),
         b if b.starts_with("time") => time(v),
         _ => Ok(()),
+    }
+}
+
+/// Type names as reported for query results (`int4`) -> SQL names.
+fn engine_alias(t: &str) -> &str {
+    match t {
+        "int2" => "smallint",
+        "int4" => "integer",
+        "int8" => "bigint",
+        "float4" => "real",
+        "float8" => "double precision",
+        "bool" => "boolean",
+        "timestamptz" => "timestamp with time zone",
+        "timetz" => "time with time zone",
+        "_int2" | "_int4" | "_int8" | "_text" | "_varchar" | "_numeric" | "_bool" => "array[]",
+        other => other,
     }
 }
 

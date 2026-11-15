@@ -57,6 +57,10 @@ pub struct ResultTab {
     pub message: String,
     pub error: bool,
     pub elapsed: Duration,
+    /// `EXPLAIN` result.
+    pub plan: Option<super::plan::Plan>,
+    /// First line shown (plans).
+    pub scroll: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +71,8 @@ pub struct Running {
     pub queue: VecDeque<(String, usize)>,
     pub total: usize,
     pub started: Instant,
+    /// `Some(analyze)` for an EXPLAIN.
+    pub explain: Option<bool>,
 }
 
 /// One line of `~/.local/share/pgtui/history` (JSON lines).
@@ -102,6 +108,10 @@ pub struct SqlState {
     pub history: Vec<HistoryEntry>,
     /// Name of the saved query being edited.
     pub file: Option<String>,
+    /// Completion popup.
+    pub popup: Option<super::completion::CompletionPopup>,
+    /// Columns for the completion, per database.
+    pub columns: super::completion::ColumnsCache,
 }
 
 impl SqlState {
@@ -137,6 +147,8 @@ impl App {
         self.results_mode = true;
         let r = f(self);
         self.results_mode = false;
+        // An overlay opened (or kept) here belongs to the result.
+        self.overlay_in_results = self.overlay.is_some();
         std::mem::swap(&mut self.data, &mut view);
         self.sql.results[i].view = Some(view);
         Some(r)
@@ -166,6 +178,12 @@ impl App {
     pub(super) fn on_sql_editor_key(&mut self, key: KeyEvent) -> Option<Vec<Effect>> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        if self.sql.editor.inserting()
+            && let Some(effects) = self.on_completion_key(&key)
+        {
+            return Some(effects);
+        }
+        let popup = self.sql.popup.is_some();
         let ed = &mut self.sql.editor;
         if ed.inserting() {
             // Esc leaves the classic editor for the results.
@@ -197,7 +215,11 @@ impl App {
                     return Some(self.dispatch(action));
                 }
             }
-            return Some(self.editor_outcome(key));
+            let mut effects = self.editor_outcome(key);
+            if popup {
+                effects.extend(self.follow_completion(&key));
+            }
+            return Some(effects);
         }
         // Vim normal / visual: the editor first, then the keymap.
         match self.sql.editor.handle_key(&key) {
@@ -230,6 +252,17 @@ impl App {
         use Action::*;
         match action {
             ExecuteStatement => return self.execute(false),
+            Complete => return self.complete(true),
+            Explain | ExplainAnalyze => return self.explain(action == ExplainAnalyze),
+            _ if self.sql.focus == SqlFocus::Results
+                && self
+                    .sql
+                    .results
+                    .get(self.sql.active)
+                    .is_some_and(|r| r.plan.is_some()) =>
+            {
+                return self.dispatch_plan(action);
+            }
             ExecuteScript => return self.execute(true),
             HistorySearch => self.open_history_search(),
             FocusResults => {
@@ -275,6 +308,13 @@ impl App {
     fn execute(&mut self, script: bool) -> Vec<Effect> {
         if self.sql.running.is_some() {
             self.notify(Level::Info, "Requête en cours (Ctrl+c pour l'annuler)");
+            return Vec::new();
+        }
+        if self.results_pending() {
+            self.notify(
+                Level::Warning,
+                "Changements en attente sur un résultat : Ctrl+s pour les appliquer, Ctrl+z pour les abandonner",
+            );
             return Vec::new();
         }
         let text = self.sql.editor.text();
@@ -350,6 +390,83 @@ impl App {
         }
     }
 
+    /// F6 / F7: EXPLAIN [ANALYZE] of the statement under the cursor.
+    fn explain(&mut self, analyze: bool) -> Vec<Effect> {
+        if self.sql.running.is_some() {
+            self.notify(Level::Info, "Requête en cours (Ctrl+c pour l'annuler)");
+            return Vec::new();
+        }
+        let text = self.sql.editor.text();
+        let range = match self.sql.editor.selection() {
+            Some(sel) => script::split(&text[sel.clone()])
+                .into_iter()
+                .next()
+                .map(|r| r.start + sel.start..r.end + sel.start),
+            None => script::statement_at(&text, self.sql.editor.offset(self.sql.editor.cursor)),
+        };
+        let Some(range) = range else {
+            self.notify(Level::Info, "Rien à expliquer");
+            return Vec::new();
+        };
+        let Some(target) = self.sql_target() else {
+            self.notify(
+                Level::Warning,
+                "Aucune connexion ouverte : connectez-vous dans l'arbre (Entrée sur une connexion)",
+            );
+            return Vec::new();
+        };
+        let stmt = text[range.clone()].to_string();
+        // The first command is replaced by an EXPLAIN.
+        let _ = self.start_run(vec![(stmt, range.start)], target);
+        if let Some(run) = &mut self.sql.running {
+            run.explain = Some(analyze);
+        }
+        self.send_current()
+    }
+
+    fn dispatch_plan(&mut self, action: Action) -> Vec<Effect> {
+        use Action::*;
+        let i = self.sql.active;
+        let r = &mut self.sql.results[i];
+        let Some(plan) = &r.plan else {
+            return Vec::new();
+        };
+        let n = plan.lines.len() * 2 + plan.summary.len();
+        match action {
+            Down => r.scroll = (r.scroll + 1).min(n.saturating_sub(1)),
+            Up => r.scroll = r.scroll.saturating_sub(1),
+            HalfPageDown | PageDown => r.scroll = (r.scroll + 10).min(n.saturating_sub(1)),
+            HalfPageUp | PageUp => r.scroll = r.scroll.saturating_sub(10),
+            Top => r.scroll = 0,
+            Bottom => r.scroll = n.saturating_sub(1),
+            Copy | CopyRow | CopyAs => {
+                let text = plan.to_text();
+                self.notify(Level::Success, "Plan copié");
+                return vec![Effect::Copy(text)];
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    /// Runs one statement again (a result after its changes were applied).
+    pub(super) fn rerun(
+        &mut self,
+        stmt: String,
+        offset: usize,
+        target: (String, String),
+    ) -> Vec<Effect> {
+        self.start_run(vec![(stmt, offset)], target)
+    }
+
+    /// Pending edits on a result (lost if the results are replaced).
+    pub fn results_pending(&self) -> bool {
+        self.sql
+            .results
+            .iter()
+            .any(|r| r.view.as_ref().is_some_and(|v| !v.staging.is_empty()))
+    }
+
     fn start_run(
         &mut self,
         statements: Vec<(String, usize)>,
@@ -370,6 +487,7 @@ impl App {
             queue,
             total,
             started: Instant::now(),
+            explain: None,
         });
         self.busy = Some(Busy {
             label: "requête".into(),
@@ -384,16 +502,24 @@ impl App {
         else {
             return Vec::new();
         };
-        vec![
-            DbCommand::Execute {
+        let cmd = match run.explain {
+            Some(analyze) => DbCommand::Explain {
+                id: run.id,
+                connection: connection.clone(),
+                database: database.clone(),
+                sql: run.current.0.clone(),
+                analyze,
+                in_transaction: self.sql.txn != TxnState::Idle,
+            },
+            None => DbCommand::Execute {
                 id: run.id,
                 connection: connection.clone(),
                 database: database.clone(),
                 sql: run.current.0.clone(),
                 max_rows: MAX_ROWS,
-            }
-            .into(),
-        ]
+            },
+        };
+        vec![cmd.into()]
     }
 
     fn history_entry(&self, sql: &str, ok: bool, elapsed: Duration) -> Option<HistoryEntry> {
@@ -428,7 +554,9 @@ impl App {
 
     pub(super) fn on_sql_event(&mut self, ev: DbEvent) -> Vec<Effect> {
         let id = match &ev {
-            DbEvent::StatementDone { id, .. } | DbEvent::StatementFailed { id, .. } => *id,
+            DbEvent::StatementDone { id, .. }
+            | DbEvent::StatementFailed { id, .. }
+            | DbEvent::Explained { id, .. } => *id,
             _ => return Vec::new(),
         };
         if self.sql.running.as_ref().is_none_or(|r| r.id != id) {
@@ -447,7 +575,28 @@ impl App {
                 }
                 let entry = self.history_entry(&stmt, true, elapsed);
                 effects.extend(self.record(entry));
-                self.sql.results.push(result_tab(&stmt, *result, elapsed));
+                let editable = match (&result.source, &self.sql.target) {
+                    (Some(src), Some((connection, database))) => {
+                        let read_only = self.server(connection).is_some_and(|s| s.conn.read_only);
+                        (!read_only).then(|| {
+                            (
+                                crate::db::catalog::ObjectRef {
+                                    connection: connection.clone(),
+                                    database: database.clone(),
+                                    schema: src.schema.clone(),
+                                    name: src.table.clone(),
+                                    kind: crate::db::catalog::ObjectKind::Table,
+                                    signature: None,
+                                },
+                                src.key.clone(),
+                            )
+                        })
+                    }
+                    _ => None,
+                };
+                self.sql
+                    .results
+                    .push(result_tab(&stmt, *result, elapsed, editable));
                 let next = self.sql.running.as_mut().and_then(|r| r.queue.pop_front());
                 match next {
                     Some(next) => {
@@ -459,6 +608,45 @@ impl App {
                     }
                     None => self.finish_run(None),
                 }
+            }
+            DbEvent::Explained { json, elapsed, .. } => {
+                let analyze = self
+                    .sql
+                    .running
+                    .as_ref()
+                    .and_then(|r| r.explain)
+                    .unwrap_or(false);
+                let label = if analyze {
+                    "EXPLAIN ANALYZE"
+                } else {
+                    "EXPLAIN"
+                };
+                let tab = match super::plan::parse(&json) {
+                    Ok(plan) => ResultTab {
+                        label: label.into(),
+                        statement: stmt.clone(),
+                        view: None,
+                        message: if plan.summary.is_empty() {
+                            format!("{} nœud(s)", plan.lines.len())
+                        } else {
+                            plan.summary.join(" · ")
+                        },
+                        error: false,
+                        elapsed,
+                        plan: Some(plan),
+                        scroll: 0,
+                    },
+                    Err(e) => error_tab(
+                        &stmt,
+                        &ExecError {
+                            message: e,
+                            position: None,
+                        },
+                        elapsed,
+                    ),
+                };
+                self.sql.results.push(tab);
+                self.finish_run(None);
             }
             DbEvent::StatementFailed { error, elapsed, .. } => {
                 self.sql.txn = match (self.sql.txn, script::txn_effect(&stmt)) {
@@ -500,7 +688,7 @@ impl App {
             .sql
             .results
             .iter()
-            .rposition(|r| r.view.is_some() || r.error)
+            .rposition(|r| r.view.is_some() || r.error || r.plan.is_some())
             .unwrap_or(n.saturating_sub(1));
         let done = self.sql.results.iter().filter(|r| !r.error).count();
         match error {
@@ -746,7 +934,12 @@ impl App {
     }
 }
 
-fn result_tab(stmt: &str, r: StatementResult, elapsed: Duration) -> ResultTab {
+fn result_tab(
+    stmt: &str,
+    r: StatementResult,
+    elapsed: Duration,
+    editable: Option<(crate::db::catalog::ObjectRef, Vec<String>)>,
+) -> ResultTab {
     let verb = script::verb(stmt);
     let n = r.row_count;
     let (label, message) = if r.returns_rows {
@@ -771,10 +964,12 @@ fn result_tab(stmt: &str, r: StatementResult, elapsed: Duration) -> ResultTab {
         statement: stmt.to_string(),
         view: r
             .returns_rows
-            .then(|| DataView::from_result(&r.columns, r.rows)),
+            .then(|| DataView::from_result(&r.columns, r.rows, editable)),
         message,
         error: false,
         elapsed,
+        plan: None,
+        scroll: 0,
     }
 }
 
@@ -786,5 +981,7 @@ fn error_tab(stmt: &str, e: &ExecError, elapsed: Duration) -> ResultTab {
         message: e.message.clone(),
         error: true,
         elapsed,
+        plan: None,
+        scroll: 0,
     }
 }

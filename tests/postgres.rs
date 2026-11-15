@@ -1465,6 +1465,54 @@ mod sql_tab {
     }
 
     #[tokio::test]
+    async fn editable_results_are_detected() {
+        let Some(url) = test_url() else { return };
+        let backend = db::connect(&request(&url), no_lost()).await.unwrap();
+        let source = |sql: &'static str| {
+            let b = &backend;
+            async move { b.execute(sql, 5).await.unwrap().source }
+        };
+        let s = source("select id, email from shop.customers where id < 3")
+            .await
+            .unwrap();
+        assert_eq!((s.schema.as_str(), s.table.as_str()), ("shop", "customers"));
+        assert_eq!(s.key, ["id"]);
+        assert!(
+            source("select * from shop.customers limit 1")
+                .await
+                .is_some()
+        );
+        assert!(
+            source("select email from shop.customers limit 1")
+                .await
+                .is_none(),
+            "no key"
+        );
+        assert!(
+            source("select id as x, email from shop.customers limit 1")
+                .await
+                .is_none(),
+            "renamed"
+        );
+        assert!(
+            source("select id, upper(email) from shop.customers limit 1")
+                .await
+                .is_none()
+        );
+        assert!(
+            source("select c.id, o.id from shop.customers c join shop.orders o on o.customer_id = c.id limit 1")
+                .await
+                .is_none()
+        );
+        assert!(
+            source("select * from shop.v_order_totals limit 1")
+                .await
+                .is_none(),
+            "a view"
+        );
+    }
+
+    #[tokio::test]
     async fn errors_carry_the_position() {
         let Some(url) = test_url() else { return };
         let backend = db::connect(&request(&url), no_lost()).await.unwrap();
@@ -1474,6 +1522,78 @@ mod sql_tab {
             .unwrap_err();
         assert!(e.message.contains("nope"), "{e}");
         assert_eq!(e.position, Some(8));
+    }
+
+    #[tokio::test]
+    async fn explain_and_explain_analyze_leave_no_trace() {
+        let Some(url) = test_url() else { return };
+        let backend = db::connect(&request(&url), no_lost()).await.unwrap();
+        let json = backend
+            .explain("select * from shop.orders where id = 3", false, false)
+            .await
+            .unwrap();
+        let plan = pgtui::app::plan::parse(&json).unwrap();
+        assert!(!plan.analyze);
+        assert!(plan.lines[0].title.contains("orders"), "{:?}", plan.lines);
+
+        let count = |b: std::sync::Arc<dyn db::Backend>| async move {
+            let r = b
+                .execute("select count(*) from shop.order_items", 1)
+                .await
+                .unwrap();
+            r.rows[0][0].clone().unwrap()
+        };
+        let backend: std::sync::Arc<dyn db::Backend> = backend;
+        let before = count(backend.clone()).await;
+        let json = backend
+            .explain(
+                "delete from shop.order_items where order_id > 0",
+                true,
+                false,
+            )
+            .await
+            .unwrap();
+        let plan = pgtui::app::plan::parse(&json).unwrap();
+        assert!(plan.analyze);
+        assert!(plan.summary.iter().any(|s| s.starts_with("Exécution")));
+        assert_eq!(count(backend.clone()).await, before, "rolled back");
+
+        // Inside a transaction: a savepoint, the transaction stays usable.
+        backend.execute("begin", 1).await.unwrap();
+        backend
+            .explain(
+                "delete from shop.order_items where order_id > 0",
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(count(backend.clone()).await, before);
+        // An error keeps the outer transaction alive too.
+        let e = backend
+            .explain("select nope", true, true)
+            .await
+            .unwrap_err();
+        assert_eq!(e.position, Some(8), "relative to the statement: {e}");
+        assert_eq!(count(backend.clone()).await, before);
+        backend.execute("rollback", 1).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn completion_columns_and_search_path() {
+        let Some(url) = test_url() else { return };
+        let backend = db::connect(&request(&url), no_lost()).await.unwrap();
+        let (cols, path) = backend.completion_columns(false).await.unwrap();
+        assert_eq!(path, ["public"]);
+        assert!(cols.iter().any(|c| c.schema == "shop"
+            && c.table == "orders"
+            && c.name == "total"
+            && c.data_type == "numeric(12,2)"));
+        assert!(
+            cols.iter().any(|c| c.table == "v_order_totals"),
+            "views too"
+        );
+        assert!(!cols.iter().any(|c| c.schema == "pg_catalog"));
     }
 
     #[tokio::test]
@@ -1503,5 +1623,89 @@ mod sql_tab {
         backend.execute("rollback", 10).await.unwrap();
         backend.execute("select 1", 10).await.unwrap();
         assert!(backend.execute("select * from tx_probe", 10).await.is_err());
+    }
+}
+
+#[tokio::test]
+async fn worker_exports_a_whole_table() {
+    use pgtui::app::export::{CopyFormat, ExportSpec};
+    use pgtui::app::value::ValueKind;
+    use pgtui::db::data::{ColumnSpec, DataRequest, Filter};
+    let Some(url) = test_url() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let (tx, mut rx) = unbounded_channel();
+    let commands = worker::spawn(tx);
+    commands
+        .send(DbCommand::Connect {
+            request: Box::new(request(&url)),
+            resolve_password: true,
+        })
+        .unwrap();
+    loop {
+        match next_event(&mut rx).await {
+            DbEvent::Connected { .. } => break,
+            DbEvent::Progress { .. } => {}
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    let req = DataRequest {
+        object: obj("shop", "orders", ObjectKind::Table),
+        columns: vec![
+            ColumnSpec {
+                name: "id".into(),
+                data_type: "bigint".into(),
+            },
+            ColumnSpec {
+                name: "status".into(),
+                data_type: "text".into(),
+            },
+        ],
+        filter: Filter::default(),
+        sort: vec![],
+        tiebreak: vec!["id".into()],
+        order_by_ctid: false,
+        with_row_version: true,
+        offset: 0,
+        limit: 0,
+    };
+    for (fmt, id) in [(CopyFormat::Csv, 1), (CopyFormat::Json, 2)] {
+        let path = dir.path().join(format!("c.{}", fmt.extension()));
+        commands
+            .send(DbCommand::Export {
+                id,
+                request: Box::new(req.clone()),
+                spec: Box::new(ExportSpec {
+                    format: fmt,
+                    path: path.clone(),
+                    columns: vec![
+                        (1, "status".into(), ValueKind::Text),
+                        (0, "id".into(), ValueKind::Integer),
+                    ],
+                    schema: "shop".into(),
+                    table: "orders".into(),
+                }),
+            })
+            .unwrap();
+        let rows = loop {
+            match next_event(&mut rx).await {
+                DbEvent::ExportProgress { .. } => {}
+                DbEvent::ExportDone { rows, .. } => break rows,
+                other => panic!("unexpected {other:?}"),
+            }
+        };
+        assert!(rows > 5_000, "several pages: {rows}");
+        let text = std::fs::read_to_string(&path).unwrap();
+        match fmt {
+            CopyFormat::Csv => {
+                assert_eq!(text.lines().count() as u64, rows + 1);
+                assert_eq!(text.lines().next(), Some("status,id"));
+                assert!(text.lines().nth(1).unwrap().ends_with(",1"));
+            }
+            _ => {
+                let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(v.as_array().unwrap().len() as u64, rows);
+                assert_eq!(v[0]["id"], serde_json::json!(1));
+            }
+        }
     }
 }

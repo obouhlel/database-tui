@@ -126,6 +126,24 @@ keys F5; sleep 0.5; shot 33-sql-garde "pgtui — onglet SQL : UPDATE sans WHERE"
 keys o; sleep 1.5; shot 34-sql-transaction "pgtui — onglet SQL : transaction manuelle"
 keys C-a; text "rollback"; keys C-e; sleep 0.5
 
+# Milestone 6: EXPLAIN, completion, editable results, palette, export.
+start "--connection demo" 140 34
+keys 3
+text "select c.country, sum(o.total) from shop.customers c"; keys Enter
+text "join shop.orders o on o.customer_id = c.id"; keys Enter
+text "where o.status = 'paid' group by c.country order by 2 desc"
+keys F7; sleep 2; shot 35-explain "pgtui — EXPLAIN ANALYZE"
+start "--connection demo" 140 28
+keys 3; text "select o. from shop.orders o join shop.customers c on c.id = o.customer_id"
+keys Home Right Right Right Right Right Right Right Right Right C-Space; sleep 1; keys Escape C-Space; sleep 0.5
+shot 36-completion "pgtui — autocomplétion (Ctrl+Space)"; keys Escape
+keys C-a; text "select id, sku, name, price, stock from shop.products order by id limit 8"; keys C-e; sleep 1
+keys C-j j l l l e C-u; text "199.90"; keys Enter
+shot 37-resultat-modifiable "pgtui — résultat SQL modifiable"
+keys u; keys i C-p; text "exp"; shot 38-palette "pgtui — palette de commandes"; keys Escape
+start "--connection demo" 140 26
+keys / c u s t o m e r s Enter Enter 2; sleep 1; keys E; shot 39-export "pgtui — export"; keys Escape
+
 # Editing scenes (milestone 4): a scratch table, recreated on each run.
 export PGPASSWORD=pgtui
 PSQL=(psql -h localhost -p 5433 -U pgtui -d demo -qX -v ON_ERROR_STOP=1)

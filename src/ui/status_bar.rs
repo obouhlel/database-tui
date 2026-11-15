@@ -241,6 +241,21 @@ pub fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
                 }
                 v
             }
+            (Screen::Main, Focus::Center)
+                if app.tab == crate::app::Tab::Sql
+                    && app.sql.active_view().is_some_and(|v| v.object.is_some()) =>
+            {
+                vec![
+                    (hint(Context::SqlResults, Action::FocusEditor), "éditeur"),
+                    (hint(Context::Data, Action::EditCell), "modifier"),
+                    (hint(Context::Data, Action::InsertRow), "nouvelle ligne"),
+                    (hint(Context::Data, Action::DeleteRow), "supprimer"),
+                    (hint(Context::Data, Action::Undo), "annuler"),
+                    (hint(Context::Data, Action::ShowChanges), "changements"),
+                    (hint(Context::Data, Action::ApplyChanges), "appliquer"),
+                    (hint(Context::Data, Action::Export), "exporter"),
+                ]
+            }
             (Screen::Main, Focus::Center) if app.tab == crate::app::Tab::Sql => vec![
                 (hint(Context::SqlResults, Action::FocusEditor), "éditeur"),
                 (
@@ -255,7 +270,7 @@ pub fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
                 (hint(Context::Data, Action::Search), "chercher"),
                 (hint(Context::Data, Action::Copy), "copier"),
                 (hint(Context::Data, Action::CopyAs), "copier comme…"),
-                (hint(Context::Data, Action::Visual), "sélection"),
+                (hint(Context::Data, Action::Export), "exporter"),
                 (hint(Context::Global, Action::Help), "aide"),
             ],
             (Screen::Main, Focus::Center)

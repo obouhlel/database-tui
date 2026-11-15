@@ -8,8 +8,20 @@ pub struct ResultColumn {
     pub data_type: String,
 }
 
+/// The table every column of a result comes from, when the rows can be
+/// edited like in the Data tab: plain columns (not renamed) of one table
+/// whose primary key is among them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResultSource {
+    pub schema: String,
+    pub table: String,
+    pub key: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StatementResult {
+    /// Set when the rows can be edited.
+    pub source: Option<ResultSource>,
     /// Empty for a statement that returns no rows (`UPDATE` without
     /// `RETURNING`, `CREATE`, ...).
     pub columns: Vec<ResultColumn>,

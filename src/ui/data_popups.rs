@@ -225,3 +225,55 @@ pub fn draw_row_detail(frame: &mut Frame, app: &App, scroll: u16, area: Rect) {
     let max = (lines.len() as u16).saturating_sub(inner.height);
     frame.render_widget(Paragraph::new(lines).scroll((scroll.min(max), 0)), inner);
 }
+
+pub fn draw_export(
+    frame: &mut Frame,
+    app: &App,
+    d: &crate::app::export_dialog::ExportDialog,
+    area: Rect,
+) {
+    let t = &app.theme;
+    let rect = centered(area, 90, 11);
+    let block = popup(
+        app,
+        " Exporter ".into(),
+        " Up/Down format · Entrée exporter · Esc annuler ",
+    );
+    frame.render_widget(Clear, rect);
+    let inner = block.inner(rect);
+    let what = if d.result {
+        format!(
+            "Lignes du résultat ({})",
+            d.rows.clone().unwrap_or_else(|| "?".into())
+        )
+    } else {
+        match &d.rows {
+            Some(n) => format!("Toute la requête : {n} ligne(s), filtres et tri compris"),
+            None => "Toute la requête (filtres et tri compris)".into(),
+        }
+    };
+    let mut lines = vec![Line::styled(what, t.dim()), Line::default()];
+    for (i, f) in CopyFormat::ALL.iter().enumerate() {
+        let selected = i == d.format;
+        let style = if selected {
+            Style::new()
+                .bg(t.selection_bg)
+                .fg(t.selection_fg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(t.fg)
+        };
+        lines.push(Line::styled(format!(" {:<16}", f.label()), style));
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(vec![
+        Span::styled("Fichier : ", t.dim()),
+        Span::styled(d.path.text().to_string(), Style::new().fg(t.fg)),
+    ]));
+    let y = inner.y + lines.len() as u16 - 1;
+    frame.render_widget(Paragraph::new(lines).block(block), rect);
+    frame.set_cursor_position((
+        (inner.x + 10 + d.path.cursor_width() as u16).min(inner.right().saturating_sub(1)),
+        y,
+    ));
+}

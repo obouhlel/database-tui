@@ -70,7 +70,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         _ => status_bar::draw_hints(frame, app, hints_area),
     }
     let swapped = app.tab == crate::app::Tab::Sql
-        && app.overlay.as_ref().is_some_and(Overlay::is_data)
+        && app.overlay_in_results
+        && app.overlay.is_some()
         && app.swap_results();
     draw_overlay(frame, app, body);
     if swapped {
@@ -119,6 +120,7 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, body: Rect) {
             body,
         ),
         Some(Overlay::ConfirmDiscard) => edit_popups::draw_confirm_discard(frame, app, body),
+        Some(Overlay::Export(d)) => data_popups::draw_export(frame, app, d, body),
         Some(Overlay::ConfirmWrites { risky, target, .. }) => {
             sql_tab::draw_confirm_writes(frame, app, risky, target, body)
         }
@@ -134,7 +136,8 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, body: Rect) {
         }
         // Drawn inside the Data tab.
         Some(Overlay::DataSearch { .. } | Overlay::FreeWhere(_)) => {}
-        Some(Overlay::Command(_)) | None => {}
+        Some(Overlay::Command(input)) => popup::draw_palette(frame, app, input, body),
+        None => {}
     }
 }
 

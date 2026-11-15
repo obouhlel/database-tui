@@ -70,6 +70,23 @@ pub trait Backend: Send + Sync {
     /// `COMMIT`, ...) is the user's: no implicit transaction is added.
     async fn execute(&self, sql: &str, max_rows: usize) -> Result<StatementResult, ExecError>;
 
+    /// `EXPLAIN (FORMAT JSON)` of a statement, as JSON text. With `analyze`
+    /// the statement really runs, inside a transaction (or a savepoint when
+    /// `in_transaction`) that is rolled back, so that writes leave no trace.
+    async fn explain(
+        &self,
+        sql: &str,
+        analyze: bool,
+        in_transaction: bool,
+    ) -> Result<String, ExecError>;
+
+    /// Every column of the database's relations and the schemas of the
+    /// search path, for completion (catalog connection).
+    async fn completion_columns(
+        &self,
+        include_system: bool,
+    ) -> anyhow::Result<(Vec<crate::sql::complete::Column>, Vec<String>)>;
+
     /// Asks the server to cancel the query running on the session connection.
     async fn cancel(&self) -> anyhow::Result<()>;
 }

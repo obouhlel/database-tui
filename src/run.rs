@@ -93,6 +93,16 @@ fn run_effect(
             };
             let _ = app.update(msg);
         }
+        Effect::WriteFile { path, text, done } => {
+            let msg = match std::fs::write(&path, text) {
+                Ok(()) => Msg::Notify(Level::Success, format!("{done} : {}", path.display())),
+                Err(e) => Msg::Notify(
+                    Level::Error,
+                    format!("Export impossible : {} : {e}", path.display()),
+                ),
+            };
+            let _ = app.update(msg);
+        }
         Effect::AppendHistory(entry) => {
             if let Some(dir) = &app.data_dir {
                 let path = crate::storage::history_path(dir);

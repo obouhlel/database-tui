@@ -97,6 +97,11 @@ impl App {
 
     /// Reloads the rows, keeping the cursor (after applying changes).
     pub(super) fn requery_data(&mut self) {
+        if self.results_mode {
+            // A SQL result reloads by running its statement again.
+            self.rerun_results = true;
+            return;
+        }
         self.requery(true);
         self.data.error = None;
     }
@@ -194,6 +199,7 @@ impl App {
             Copy => return self.copy_data(CopyFormat::Tsv, false, false),
             CopyRow => return self.copy_data(CopyFormat::Tsv, true, false),
             CopyAs => self.overlay = Some(Overlay::CopyFormat { cursor: 0 }),
+            Export => self.open_export(),
             Search => {
                 self.overlay = Some(Overlay::DataSearch {
                     input: LineInput::default(),

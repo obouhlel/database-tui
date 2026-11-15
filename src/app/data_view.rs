@@ -212,9 +212,11 @@ impl DataView {
     }
 
     /// A fully loaded, read-only result of the SQL tab.
+    /// `editable`: the table the rows come from and its key columns.
     pub fn from_result(
         columns: &[crate::db::exec::ResultColumn],
         rows: Vec<Vec<Option<String>>>,
+        editable: Option<(ObjectRef, Vec<String>)>,
     ) -> Self {
         let n = rows.len();
         let mut v = DataView {
@@ -237,6 +239,19 @@ impl DataView {
             ..Default::default()
         };
         v.staging = Staging::new(Vec::new(), v.columns.len());
+        if let Some((object, key)) = editable {
+            for c in &mut v.columns {
+                c.key = key.contains(&c.name);
+            }
+            let idx = key
+                .iter()
+                .filter_map(|k| v.columns.iter().position(|c| &c.name == k))
+                .collect();
+            v.staging = Staging::new(idx, v.columns.len());
+            v.key_columns = key;
+            v.object = Some(object);
+            v.read_only_reason = None;
+        }
         v.base_order = (0..v.columns.len()).collect();
         v.auto_width = v
             .columns

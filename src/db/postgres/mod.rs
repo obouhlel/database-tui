@@ -23,7 +23,7 @@ use super::backend::{Backend, BackendKind, ServerInfo};
 use super::catalog::{Catalog, DatabaseInfo, ObjectRef};
 use super::changes::{ApplyError, ChangeCounts, ChangeSet};
 use super::data::{DataRequest, RowCount, TextRows};
-use super::exec::{ExecError, ResultColumn, StatementResult};
+use super::exec::{ExecError, ResultColumn, ResultSource, StatementResult};
 use super::schema::ObjectDetails;
 use super::{ConnectError, ConnectRequest};
 use crate::config::SslMode;
@@ -350,14 +350,38 @@ impl Backend for PgBackend {
                 | "call"
                 | "returning"
         );
+        let mut origin: Option<(u32, Vec<i16>, Vec<String>)> = None;
         let types: Option<Vec<String>> = if may_return {
             match self.session.prepare(sql).await {
-                Ok(st) => Some(
-                    st.columns()
-                        .iter()
-                        .map(|c| c.type_().name().to_string())
-                        .collect(),
-                ),
+                Ok(st) => {
+                    let cols = st.columns();
+                    // Every column straight from the same table?
+                    let table = cols.first().and_then(|c| c.table_oid());
+                    if matches!(verb.as_str(), "select" | "table")
+                        && let Some(oid) = table
+                        && cols
+                            .iter()
+                            .all(|c| c.table_oid() == Some(oid) && c.column_id().is_some())
+                    {
+                        origin = Some((
+                            oid,
+                            cols.iter().filter_map(|c| c.column_id()).collect(),
+                            cols.iter().map(|c| c.name().to_string()).collect(),
+                        ));
+                    }
+                    Some(
+                        cols.iter()
+                            .map(|c| {
+                                let t = c.type_();
+                                if t.schema() == "pg_catalog" {
+                                    t.name().to_string()
+                                } else {
+                                    crate::sql::quote_qualified(t.schema(), t.name())
+                                }
+                            })
+                            .collect(),
+                    )
+                }
                 Err(e) if e.as_db_error().is_some() => return Err(exec_error(e)),
                 Err(_) => None,
             }
@@ -402,12 +426,154 @@ impl Backend for PgBackend {
                 _ => {}
             }
         }
+        drop(_guard);
+        if let Some((oid, attnums, names)) = origin {
+            result.source = self.result_source(oid, &attnums, &names).await;
+        }
         Ok(result)
+    }
+
+    async fn explain(
+        &self,
+        sql: &str,
+        analyze: bool,
+        in_transaction: bool,
+    ) -> Result<String, ExecError> {
+        use tokio_postgres::SimpleQueryMessage;
+        let _guard = self.session_lock.lock().await;
+        let options = if analyze {
+            "FORMAT JSON, ANALYZE, BUFFERS"
+        } else {
+            "FORMAT JSON"
+        };
+        let (open, close) = match (analyze, in_transaction) {
+            (false, _) => (None, None),
+            (true, false) => (Some("BEGIN"), Some("ROLLBACK")),
+            (true, true) => (
+                Some("SAVEPOINT pgtui_explain"),
+                Some("ROLLBACK TO SAVEPOINT pgtui_explain; RELEASE SAVEPOINT pgtui_explain"),
+            ),
+        };
+        if let Some(open) = open {
+            self.session.batch_execute(open).await.map_err(exec_error)?;
+        }
+        let prefix = format!("EXPLAIN ({options}) ");
+        let result = self.session.simple_query(&format!("{prefix}{sql}")).await;
+        if let Some(close) = close {
+            // Undo the statement whatever happened (an error leaves the
+            // transaction aborted until this rollback).
+            if let Err(e) = self.session.batch_execute(close).await {
+                tracing::error!("rollback after EXPLAIN ANALYZE failed: {e}");
+            }
+        }
+        // Positions are relative to the user's statement.
+        let messages = result.map_err(|e| {
+            let mut err = exec_error(e);
+            err.position = err
+                .position
+                .and_then(|p| p.checked_sub(prefix.chars().count() as u32));
+            err
+        })?;
+        let json: String = messages
+            .iter()
+            .filter_map(|m| match m {
+                SimpleQueryMessage::Row(r) => r.get(0).map(str::to_string),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(json)
+    }
+
+    async fn completion_columns(
+        &self,
+        include_system: bool,
+    ) -> anyhow::Result<(Vec<crate::sql::complete::Column>, Vec<String>)> {
+        let rows = self
+            .catalog
+            .query(
+                "SELECT n.nspname::text, c.relname::text, a.attname::text, \
+                        format_type(a.atttypid, a.atttypmod) \
+                 FROM pg_attribute a \
+                 JOIN pg_class c ON c.oid = a.attrelid \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE a.attnum > 0 AND NOT a.attisdropped \
+                   AND c.relkind IN ('r', 'p', 'v', 'm', 'f') \
+                   AND ($1 OR (n.nspname NOT IN ('pg_catalog', 'information_schema') \
+                               AND n.nspname NOT LIKE 'pg\\_toast%' \
+                               AND n.nspname NOT LIKE 'pg\\_temp%')) \
+                   AND has_schema_privilege(n.oid, 'USAGE') \
+                 ORDER BY n.nspname, c.relname, a.attnum",
+                &[&include_system],
+            )
+            .await
+            .map_err(pg_error)?;
+        let columns = rows
+            .iter()
+            .map(|r| crate::sql::complete::Column {
+                schema: r.get(0),
+                table: r.get(1),
+                name: r.get(2),
+                data_type: r.get(3),
+            })
+            .collect();
+        let path: Vec<String> = self
+            .catalog
+            .query_one("SELECT current_schemas(false)::text[]", &[])
+            .await
+            .map_err(pg_error)?
+            .get(0);
+        Ok((columns, path))
     }
 
     async fn cancel(&self) -> anyhow::Result<()> {
         self.cancel.cancel_query(self.tls.clone()).await?;
         Ok(())
+    }
+}
+
+impl PgBackend {
+    /// Whether rows of `table_oid` with these columns can be edited: an
+    /// ordinary or partitioned table, columns not renamed, the whole
+    /// primary key among them.
+    async fn result_source(
+        &self,
+        table_oid: u32,
+        attnums: &[i16],
+        names: &[String],
+    ) -> Option<ResultSource> {
+        let row = self
+            .catalog
+            .query_opt(
+                "SELECT n.nspname::text, c.relname::text, \
+                        array(SELECT a.attname::text FROM pg_attribute a \
+                              WHERE a.attrelid = c.oid AND a.attnum = ANY($2::int2[]) \
+                              ORDER BY array_position($2::int2[], a.attnum)), \
+                        array(SELECT a.attname::text FROM pg_index i \
+                              JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) \
+                              WHERE i.indrelid = c.oid AND i.indisprimary ORDER BY a.attnum) \
+                 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE c.oid = $1 AND c.relkind IN ('r', 'p')",
+                &[&table_oid, &attnums],
+            )
+            .await
+            .ok()??;
+        let attnames: Vec<String> = row.get(2);
+        let key: Vec<String> = row.get(3);
+        let same_names =
+            attnames.len() == names.len() && attnames.iter().zip(names).all(|(a, n)| a == n);
+        let mut unique = names.to_vec();
+        unique.sort();
+        unique.dedup();
+        let ok = same_names
+            && unique.len() == names.len()
+            && !key.is_empty()
+            && key.iter().all(|k| names.contains(k));
+        ok.then(|| ResultSource {
+            schema: row.get(0),
+            table: row.get(1),
+            key,
+        })
     }
 }
 

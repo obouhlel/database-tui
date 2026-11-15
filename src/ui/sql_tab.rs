@@ -172,7 +172,11 @@ fn draw_editor(frame: &mut Frame, app: &mut App, t: &Theme, area: Rect) {
         let x = (ed.cursor_width().saturating_sub(hscroll) + gutter + 1) as u16;
         let y = (ed.cursor.row - scroll) as u16;
         if y < area.height {
-            frame.set_cursor_position((area.x + x.min(area.width.saturating_sub(1)), area.y + y));
+            let cx = area.x + x.min(area.width.saturating_sub(1));
+            frame.set_cursor_position((cx, area.y + y));
+            if let Some(popup) = &app.sql.popup {
+                draw_completion(frame, t, popup, cx, area.y + y, frame.area());
+            }
         }
     }
 }
@@ -203,6 +207,19 @@ fn draw_result_tabs(frame: &mut Frame, app: &App, t: &Theme, area: Rect) {
         spans.push(Span::raw(" "));
     }
     if let Some(r) = app.sql.results.get(app.sql.active) {
+        if let Some(v) = &r.view {
+            match (&v.object, app.pending_changes()) {
+                (Some(_), Some(c)) => spans.push(Span::styled(
+                    format!(" en attente : {} ·", c.describe()),
+                    Style::new().fg(t.warning).add_modifier(Modifier::BOLD),
+                )),
+                (Some(o), None) => spans.push(Span::styled(
+                    format!(" modifiable ({}.{}) ·", o.schema, o.name),
+                    Style::new().fg(t.info),
+                )),
+                _ => {}
+            }
+        }
         spans.push(Span::styled(
             format!(
                 " {} · {}",
@@ -225,6 +242,63 @@ fn draw_result(frame: &mut Frame, app: &mut App, t: &Theme, area: Rect) {
     let Some(r) = app.sql.results.get(i) else {
         return;
     };
+    if let Some(plan) = &r.plan {
+        let mut lines: Vec<Line> = Vec::new();
+        for l in &plan.lines {
+            let (color, bold) = if l.share >= 0.3 {
+                (t.error, true)
+            } else if l.share >= 0.1 {
+                (t.warning, true)
+            } else {
+                (t.fg, false)
+            };
+            let mut title = Style::new().fg(color);
+            if bold {
+                title = title.add_modifier(Modifier::BOLD);
+            }
+            let mut spans = vec![
+                Span::styled(
+                    format!("{:>4.0} % ", l.share * 100.0),
+                    Style::new().fg(color),
+                ),
+                Span::styled(l.prefix.clone(), Style::new().fg(t.border)),
+                Span::styled(l.title.clone(), title),
+            ];
+            if l.misestimate {
+                spans.push(Span::styled("  estimation ×10", Style::new().fg(t.warning)));
+            }
+            lines.push(Line::from(spans));
+            let indent = format!(
+                "       {}",
+                l.prefix.replace('├', "│").replace(['└', '─'], " ")
+            );
+            lines.push(Line::from(vec![
+                Span::styled(indent.clone(), Style::new().fg(t.border)),
+                Span::styled(l.stats.clone(), t.dim()),
+            ]));
+            for d in &l.details {
+                lines.push(Line::from(vec![
+                    Span::styled(indent.clone(), Style::new().fg(t.border)),
+                    Span::styled(d.clone(), Style::new().fg(t.info)),
+                ]));
+            }
+        }
+        if !plan.summary.is_empty() {
+            lines.push(Line::default());
+            for s in &plan.summary {
+                lines.push(Line::styled(s.clone(), Style::new().fg(t.fg)));
+            }
+        }
+        if !plan.analyze {
+            lines.push(Line::default());
+            lines.push(Line::styled(
+                "Estimation seule : F7 pour EXPLAIN ANALYZE (l'instruction s'exécute puis est annulée).",
+                t.dim(),
+            ));
+        }
+        frame.render_widget(Paragraph::new(lines).scroll((r.scroll as u16, 0)), area);
+        return;
+    }
     if r.view.is_none() {
         let mut lines = Vec::new();
         if r.error {
@@ -271,6 +345,15 @@ fn draw_result(frame: &mut Frame, app: &mut App, t: &Theme, area: Rect) {
         table_view::draw(frame, grid_area, data, &mut grid, t, &opts);
     }
     view.grid = grid;
+    if let Some(Overlay::CellEditor(ed)) = &app.overlay
+        && app.overlay_in_results
+        && let crate::app::edit::EditorInput::Line(input) = &ed.input
+    {
+        let view = app.sql.results[i].view.as_ref().expect("checked");
+        if let Some(cell) = table_view::cell_rect(grid_area, view, &view.grid, grid.row, ed.dcol) {
+            super::edit_popups::draw_inline_editor(frame, app, ed, input, cell, grid_area);
+        }
+    }
     if let Some(Overlay::DataSearch { input, .. }) = &app.overlay
         && search_line
     {
@@ -505,5 +588,78 @@ pub fn draw_query_list(frame: &mut Frame, app: &App, names: &[String], cursor: u
             }
         })
         .collect();
+    frame.render_widget(Paragraph::new(lines).block(block), rect);
+}
+
+/// Completion list under (or above) the cursor at (`x`, `y`).
+fn draw_completion(
+    frame: &mut Frame,
+    t: &Theme,
+    popup: &crate::app::completion::CompletionPopup,
+    x: u16,
+    y: u16,
+    screen: Rect,
+) {
+    const MAX: usize = 10;
+    let n = popup.items.len().min(MAX);
+    let label_w = popup
+        .items
+        .iter()
+        .map(|c| c.label.width())
+        .max()
+        .unwrap_or(4)
+        .min(40);
+    let detail_w = popup
+        .items
+        .iter()
+        .map(|c| c.detail.width())
+        .max()
+        .unwrap_or(0)
+        .min(36);
+    let width = (label_w + detail_w + 6).min(screen.width as usize) as u16;
+    let height = n as u16 + 2;
+    let below = y + 1 + height <= screen.bottom();
+    let top = if below {
+        y + 1
+    } else {
+        y.saturating_sub(height)
+    };
+    let left = x.min(screen.right().saturating_sub(width));
+    let rect = Rect {
+        x: left,
+        y: top,
+        width,
+        height,
+    };
+    let block = Block::bordered()
+        .border_style(Style::new().fg(t.border))
+        .title_bottom(Line::styled(
+            format!(" {}/{} ", popup.cursor + 1, popup.items.len()),
+            t.dim(),
+        ))
+        .style(t.base());
+    let offset = popup.cursor.saturating_sub(MAX - 1);
+    let lines: Vec<Line> = popup
+        .items
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(MAX)
+        .map(|(i, c)| {
+            let selected = i == popup.cursor;
+            let base = if selected {
+                Style::new().bg(t.selection_bg).fg(t.selection_fg)
+            } else {
+                Style::new().fg(t.fg)
+            };
+            let label = super::table_view::fit(&c.label, label_w);
+            let detail = super::table_view::fit(&c.detail, detail_w);
+            Line::from(vec![
+                Span::styled(format!(" {label}  "), base.add_modifier(Modifier::BOLD)),
+                Span::styled(format!("{detail} "), if selected { base } else { t.dim() }),
+            ])
+        })
+        .collect();
+    frame.render_widget(Clear, rect);
     frame.render_widget(Paragraph::new(lines).block(block), rect);
 }

@@ -108,6 +108,13 @@ impl After {
 impl App {
     /// Pending changes of the open table, if any.
     pub fn pending_changes(&self) -> Option<ChangeCounts> {
+        if self.tab == super::Tab::Sql && !self.results_mode {
+            return self
+                .sql
+                .active_view()
+                .filter(|v| !v.staging.is_empty())
+                .map(|v| v.staging.counts());
+        }
         (!self.data.staging.is_empty()).then(|| self.data.staging.counts())
     }
 
@@ -682,6 +689,7 @@ impl App {
         self.request_seq += 1;
         let id = self.request_seq;
         self.data.applying = Some(id);
+        self.apply_in_results = self.results_mode.then_some(self.sql.active);
         let (set, origins) = self
             .data
             .staging
@@ -741,6 +749,32 @@ impl App {
     }
 
     pub(super) fn on_apply_event(&mut self, ev: DbEvent) -> Vec<Effect> {
+        let Some(i) = self.apply_in_results.take() else {
+            return self.apply_event(ev);
+        };
+        // Changes of a SQL result: handled on that result, then the
+        // statement runs again to show the new values.
+        let prev = self.sql.active;
+        self.sql.active = i;
+        self.rerun_results = false;
+        let effects = self
+            .with_results(|app| app.apply_event(ev))
+            .unwrap_or_default();
+        let statement = self.sql.results.get(i).map(|r| r.statement.clone());
+        if self.rerun_results
+            && let (Some(stmt), Some(target)) = (statement, self.sql.target.clone())
+        {
+            self.rerun_results = false;
+            let offset = self.sql.editor.text().find(&stmt).unwrap_or(0);
+            let mut effects = effects;
+            effects.extend(self.rerun(stmt, offset, target));
+            return effects;
+        }
+        self.sql.active = prev.min(self.sql.results.len().saturating_sub(1));
+        effects
+    }
+
+    fn apply_event(&mut self, ev: DbEvent) -> Vec<Effect> {
         match ev {
             DbEvent::ChangesApplied {
                 id,

@@ -243,3 +243,71 @@ pub fn draw_confirm_delete(frame: &mut Frame, app: &App, name: &str, area: Rect)
         rect,
     );
 }
+
+/// Suggestions of the command palette, at the bottom of `area`.
+pub fn draw_palette(frame: &mut Frame, app: &App, input: &LineInput, area: Rect) {
+    let t = &app.theme;
+    let matches = app.palette_matches(input.text());
+    if matches.is_empty() {
+        return;
+    }
+    const MAX: usize = 10;
+    let n = matches.len().min(MAX);
+    let height = n as u16 + 2;
+    let width = area.width.min(100);
+    let rect = Rect {
+        x: area.x,
+        y: area.bottom().saturating_sub(height),
+        width,
+        height: height.min(area.height),
+    };
+    let cursor = app.palette_cursor.map(|c| c.min(matches.len() - 1));
+    let offset = cursor.unwrap_or(0).saturating_sub(MAX - 1);
+    let label_w = matches
+        .iter()
+        .map(|m| m.label.len())
+        .max()
+        .unwrap_or(4)
+        .min(28);
+    let lines: Vec<Line> = matches
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(MAX)
+        .map(|(i, m)| {
+            let selected = Some(i) == cursor;
+            let base = if selected {
+                Style::new().bg(t.selection_bg).fg(t.selection_fg)
+            } else {
+                Style::new().fg(t.fg)
+            };
+            let mut spans = vec![
+                Span::styled(
+                    format!(" {:<label_w$}  ", m.label),
+                    base.add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(m.description.clone(), if selected { base } else { t.dim() }),
+            ];
+            if !m.keys.is_empty() {
+                spans.push(Span::styled(
+                    format!("  {}", m.keys),
+                    Style::new().fg(t.accent),
+                ));
+            }
+            Line::from(spans)
+        })
+        .collect();
+    let block = Block::bordered()
+        .title(Span::styled(
+            " Commandes et actions ",
+            Style::new().fg(t.accent).add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Line::styled(
+            " Up/Down choisir · Tab compléter · Entrée exécuter ",
+            t.dim(),
+        ))
+        .border_style(t.border(true))
+        .style(t.base());
+    frame.render_widget(ratatui::widgets::Clear, rect);
+    frame.render_widget(Paragraph::new(lines).block(block), rect);
+}

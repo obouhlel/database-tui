@@ -97,6 +97,7 @@ fn real_main(cli: Cli) -> Result<()> {
     app.config_path = Some(config_path.clone());
     app.sql.history = pgtui::storage::load_history(&pgtui::storage::history_path(&paths.data_dir));
     app.data_dir = Some(paths.data_dir.clone());
+    app.export_dir = std::env::current_dir().ok();
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

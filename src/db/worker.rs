@@ -66,6 +66,27 @@ pub enum DbCommand {
         sql: String,
         max_rows: usize,
     },
+    /// `EXPLAIN` a statement of the SQL tab (see `Backend::explain`).
+    Explain {
+        id: u64,
+        connection: String,
+        database: String,
+        sql: String,
+        analyze: bool,
+        in_transaction: bool,
+    },
+    /// Columns and search path of a database, for completion.
+    LoadCompletion {
+        connection: String,
+        database: String,
+        include_system: bool,
+    },
+    /// Write every row of a Data tab query to a file, page by page.
+    Export {
+        id: u64,
+        request: Box<DataRequest>,
+        spec: Box<crate::app::export::ExportSpec>,
+    },
     /// Cancel the query running on the session connection of a database.
     Cancel {
         connection: String,
@@ -149,6 +170,32 @@ pub enum DbEvent {
         id: u64,
         error: ExecError,
         elapsed: Duration,
+    },
+    /// The plan as JSON text.
+    Explained {
+        id: u64,
+        json: String,
+        elapsed: Duration,
+    },
+    CompletionLoaded {
+        connection: String,
+        database: String,
+        columns: Vec<crate::sql::complete::Column>,
+        search_path: Vec<String>,
+    },
+    ExportProgress {
+        id: u64,
+        rows: u64,
+    },
+    ExportDone {
+        id: u64,
+        rows: u64,
+        path: std::path::PathBuf,
+        elapsed: Duration,
+    },
+    ExportFailed {
+        id: u64,
+        error: String,
     },
     Discovered(Vec<DiscoveredServer>),
     /// A step of a long operation (opening a tunnel, connecting).
@@ -471,6 +518,94 @@ async fn run(mut commands: UnboundedReceiver<DbCommand>, events: UnboundedSender
                     );
                 });
             }
+            DbCommand::Explain {
+                id,
+                connection,
+                database,
+                sql,
+                analyze,
+                in_transaction,
+            } => {
+                let p = pool(&pools, &connection);
+                let events = events.clone();
+                tokio::spawn(async move {
+                    let started = Instant::now();
+                    let result = match p {
+                        None => Err(ExecError {
+                            message: "non connecté".into(),
+                            position: None,
+                        }),
+                        Some(p) => match p.get(&database).await {
+                            Ok(b) => b.explain(&sql, analyze, in_transaction).await,
+                            Err(e) => Err(ExecError {
+                                message: e.to_string(),
+                                position: None,
+                            }),
+                        },
+                    };
+                    let elapsed = started.elapsed();
+                    send(
+                        &events,
+                        match result {
+                            Ok(json) => DbEvent::Explained { id, json, elapsed },
+                            Err(error) => DbEvent::StatementFailed { id, error, elapsed },
+                        },
+                    );
+                });
+            }
+            DbCommand::LoadCompletion {
+                connection,
+                database,
+                include_system,
+            } => {
+                let Some(p) = pool(&pools, &connection) else {
+                    continue;
+                };
+                let events = events.clone();
+                tokio::spawn(async move {
+                    let result = match p.get(&database).await {
+                        Ok(b) => b.completion_columns(include_system).await,
+                        Err(e) => Err(e.into()),
+                    };
+                    match result {
+                        Ok((columns, search_path)) => send(
+                            &events,
+                            DbEvent::CompletionLoaded {
+                                connection,
+                                database,
+                                columns,
+                                search_path,
+                            },
+                        ),
+                        Err(e) => {
+                            tracing::warn!(%connection, %database, "completion columns: {e:#}")
+                        }
+                    }
+                });
+            }
+            DbCommand::Export { id, request, spec } => {
+                let p = pool(&pools, &request.object.connection);
+                let events = events.clone();
+                tokio::spawn(async move {
+                    let started = Instant::now();
+                    let result = match p {
+                        None => Err("non connecté".to_string()),
+                        Some(p) => export(&p, *request, &spec, id, &events).await,
+                    };
+                    send(
+                        &events,
+                        match result {
+                            Ok(rows) => DbEvent::ExportDone {
+                                id,
+                                rows,
+                                path: spec.path.clone(),
+                                elapsed: started.elapsed(),
+                            },
+                            Err(error) => DbEvent::ExportFailed { id, error },
+                        },
+                    );
+                });
+            }
             DbCommand::Cancel {
                 connection,
                 database,
@@ -638,6 +773,53 @@ fn watch_tunnel(pool: std::sync::Weak<Pool>, on_lost: super::postgres::OnConnect
             }
         }
     });
+}
+
+/// Rows fetched per round trip by an export.
+const EXPORT_PAGE: u64 = 5_000;
+
+async fn export(
+    pool: &Pool,
+    mut request: DataRequest,
+    spec: &crate::app::export::ExportSpec,
+    id: u64,
+    events: &UnboundedSender<DbEvent>,
+) -> Result<u64, String> {
+    use std::io::Write;
+    let backend = pool
+        .get(&request.object.database)
+        .await
+        .map_err(|e| e.to_string())?;
+    let file =
+        std::fs::File::create(&spec.path).map_err(|e| format!("{} : {e}", spec.path.display()))?;
+    let mut out = std::io::BufWriter::new(file);
+    let io = |e: std::io::Error| format!("{} : {e}", spec.path.display());
+    request.with_row_version = false;
+    request.offset = 0;
+    request.limit = EXPORT_PAGE;
+    let mut total = 0u64;
+    loop {
+        let page = backend
+            .fetch_rows(&request)
+            .await
+            .map_err(|e| format!("{e:#}"))?;
+        let n = page.rows.len() as u64;
+        out.write_all(
+            spec.chunk(&page.rows, total == 0 && request.offset == 0)
+                .as_bytes(),
+        )
+        .map_err(io)?;
+        total += n;
+        if n < EXPORT_PAGE {
+            break;
+        }
+        request.offset += n;
+        send(events, DbEvent::ExportProgress { id, rows: total });
+    }
+    out.write_all(crate::app::export::finish(spec.format).as_bytes())
+        .map_err(io)?;
+    out.flush().map_err(io)?;
+    Ok(total)
 }
 
 fn not_connected() -> ApplyError {
