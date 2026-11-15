@@ -36,6 +36,8 @@ pub struct TreeRow {
     pub count: Option<usize>,
     /// Character indices of `label` matched by the filter.
     pub highlights: Vec<usize>,
+    /// Fuzzy match score when filtering (higher is better), 0 otherwise.
+    pub score: u32,
 }
 
 #[derive(Debug, Default)]
@@ -77,14 +79,17 @@ impl TreeState {
         self.cursor = selected
             .and_then(|k| self.rows.iter().position(|r| r.key == k))
             .unwrap_or_else(|| {
-                // When filtering, land on the first object rather than a schema.
+                // When filtering, land on the best match rather than a schema.
                 if self.filter.is_empty() {
                     self.cursor
                 } else {
                     self.rows
                         .iter()
-                        .position(|r| matches!(r.kind, RowKind::Object(_)))
-                        .unwrap_or(0)
+                        .enumerate()
+                        .filter(|(_, r)| matches!(r.kind, RowKind::Object(_)))
+                        // First of the best scores (max_by_key keeps the last).
+                        .min_by_key(|(_, r)| std::cmp::Reverse(r.score))
+                        .map_or(0, |(i, _)| i)
                 }
             })
             .min(self.rows.len().saturating_sub(1));
@@ -104,6 +109,7 @@ impl TreeState {
                 expanded: s_open,
                 count: None,
                 highlights: Vec::new(),
+                score: 0,
             });
             if !s_open {
                 continue;
@@ -123,6 +129,7 @@ impl TreeState {
                     expanded: g_open,
                     count: Some(objects.len()),
                     highlights: Vec::new(),
+                    score: 0,
                 });
                 if g_open {
                     rows.extend(objects.into_iter().map(|(_, o)| TreeRow {
@@ -133,6 +140,7 @@ impl TreeState {
                         expanded: false,
                         count: None,
                         highlights: Vec::new(),
+                        score: 0,
                     }));
                 }
             }
@@ -294,12 +302,9 @@ fn build_filtered(catalog: &Catalog, query: &str) -> Vec<TreeRow> {
                 };
                 indices.clear();
                 let haystack = Utf32Str::new(&haystack_text, &mut buf);
-                if pattern
-                    .indices(haystack, &mut matcher, &mut indices)
-                    .is_none()
-                {
+                let Some(score) = pattern.indices(haystack, &mut matcher, &mut indices) else {
                     continue;
-                }
+                };
                 let highlights = if qualified {
                     let skip = schema.name.chars().count() as u32 + 1;
                     indices
@@ -321,11 +326,14 @@ fn build_filtered(catalog: &Catalog, query: &str) -> Vec<TreeRow> {
                     expanded: false,
                     count: None,
                     highlights,
+                    score,
                 });
             }
             if group_rows.is_empty() {
                 continue;
             }
+            // Best matches first; the sort is stable, so ties keep name order.
+            group_rows.sort_by_key(|r| std::cmp::Reverse(r.score));
             schema_rows.push(TreeRow {
                 key: NodeKey::Group(schema.name.clone(), group),
                 kind: RowKind::Group(group),
@@ -334,6 +342,7 @@ fn build_filtered(catalog: &Catalog, query: &str) -> Vec<TreeRow> {
                 expanded: true,
                 count: Some(group_rows.len()),
                 highlights: Vec::new(),
+                score: 0,
             });
             schema_rows.append(&mut group_rows);
         }
@@ -348,6 +357,7 @@ fn build_filtered(catalog: &Catalog, query: &str) -> Vec<TreeRow> {
             expanded: true,
             count: None,
             highlights: Vec::new(),
+            score: 0,
         });
         rows.append(&mut schema_rows);
     }
@@ -475,6 +485,24 @@ mod tests {
         );
         assert_eq!(t.selected().unwrap().label, "orders");
         assert_eq!(t.rows[2].highlights, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn filter_ranks_best_match_first() {
+        let mut cat = catalog();
+        // `order_items` sorts before `orders` alphabetically but matches worse.
+        cat.schemas[0]
+            .objects
+            .insert(1, obj("order_items", ObjectKind::Table));
+        let mut t = TreeState {
+            viewport: 10,
+            ..Default::default()
+        };
+        t.filter = LineInput::with_text("orders");
+        t.rebuild(&cat);
+        assert_eq!(t.rows[2].label, "orders");
+        assert_eq!(t.rows[3].label, "order_items");
+        assert_eq!(t.selected().unwrap().label, "orders");
     }
 
     #[test]
