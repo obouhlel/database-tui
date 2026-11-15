@@ -16,5 +16,6 @@ pub mod db;
 pub mod keymap;
 pub mod logging;
 pub mod run;
+pub mod sql;
 pub mod terminal;
 pub mod ui;
