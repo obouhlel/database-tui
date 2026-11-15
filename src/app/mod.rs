@@ -9,6 +9,7 @@ mod data_tab;
 pub mod data_view;
 pub mod discovery;
 pub mod edit;
+pub mod editor;
 pub mod export;
 pub mod filter_editor;
 pub mod format;
@@ -17,6 +18,7 @@ pub mod input;
 pub mod schema_view;
 pub mod server;
 mod servers;
+pub mod sql_tab;
 pub mod staging;
 pub mod textarea;
 pub mod tree;
@@ -51,6 +53,12 @@ pub enum Msg {
     Terminate,
     /// Feedback from the event loop (e.g. a clipboard failure).
     Notify(Level, String),
+    /// Saved queries found on disk (`:open` without a name).
+    QueriesListed(Vec<String>),
+    QueryLoaded {
+        name: String,
+        text: String,
+    },
 }
 
 /// Side effects requested by the reducer, executed by the event loop.
@@ -63,6 +71,15 @@ pub enum Effect {
     SaveConnection(Box<ConnectionConfig>),
     /// Remove a connection from `config.toml`.
     DeleteConnection(String),
+    /// Append a statement to the history file.
+    AppendHistory(Box<sql_tab::HistoryEntry>),
+    /// Saved queries (`<data dir>/queries/<name>.sql`).
+    SaveQuery {
+        name: String,
+        text: String,
+    },
+    LoadQuery(String),
+    ListQueries,
 }
 
 impl From<DbCommand> for Effect {
@@ -141,8 +158,10 @@ pub enum Mode {
     VisualLine,
     /// Editing a cell of an existing row.
     Edit,
-    /// Editing a cell of a new row.
+    /// Editing a cell of a new row (or vim insert mode in the SQL editor).
     Insert,
+    /// Typing in the classic SQL editor.
+    Sql,
 }
 
 impl Mode {
@@ -156,6 +175,7 @@ impl Mode {
             Mode::VisualLine => "V-LINE",
             Mode::Edit => "EDIT",
             Mode::Insert => "INSERT",
+            Mode::Sql => "SQL",
         }
     }
 }
@@ -232,10 +252,25 @@ pub enum Overlay {
     ConfirmDiscard,
     /// Leaving the table with pending changes.
     PendingChanges(edit::After),
+    /// `UPDATE` / `DELETE` without `WHERE` in what is about to run.
+    ConfirmWrites {
+        statements: Vec<(String, usize)>,
+        target: (String, String),
+        risky: Vec<String>,
+    },
+    /// Quitting / disconnecting with an open SQL transaction.
+    ConfirmTxnExit(edit::After),
+    /// `Ctrl+r` in the SQL tab.
+    HistorySearch(Box<sql_tab::HistorySearch>),
+    /// `:open` without a name.
+    QueryList {
+        names: Vec<String>,
+        cursor: usize,
+    },
 }
 
 impl Overlay {
-    fn is_data(&self) -> bool {
+    pub fn is_data(&self) -> bool {
         matches!(
             self,
             Overlay::DataSearch { .. }
@@ -288,6 +323,8 @@ pub struct App {
     login: Option<discovery::LoginForm>,
     /// Where discovered servers are saved.
     pub config_path: Option<PathBuf>,
+    /// History and saved queries live here.
+    pub data_dir: Option<PathBuf>,
     /// Config / keymap warnings shown in the picker.
     pub warnings: Vec<String>,
 
@@ -305,6 +342,9 @@ pub struct App {
     after_apply: Option<edit::After>,
     /// What each change of the apply in flight refers to.
     apply_origins: Vec<staging::Origin>,
+    pub sql: sql_tab::SqlState,
+    /// `data` currently holds a SQL result (swapped in).
+    pub results_mode: bool,
 
     pub overlay: Option<Overlay>,
     pub status: Option<StatusMessage>,
@@ -344,7 +384,9 @@ impl App {
         if let Some(d) = &default {
             tree.select(&NodeKey::Connection(d.clone()));
         }
+        let sql = sql_tab::SqlState::new(config.editor.mode, config.editor.tab_width as usize);
         Self {
+            sql,
             config,
             keymap,
             theme,
@@ -363,6 +405,7 @@ impl App {
             request_seq: 0,
             after_apply: None,
             apply_origins: Vec::new(),
+            results_mode: false,
             overlay: None,
             status: None,
             busy: None,
@@ -375,6 +418,7 @@ impl App {
             discovering: false,
             login: None,
             config_path: None,
+            data_dir: None,
         }
     }
 
@@ -408,6 +452,13 @@ impl App {
                 edit::EditTarget::Existing(_) => Mode::Edit,
             },
             _ if self.tree.filter_editing => Mode::Filter,
+            _ if self.sql_editor_focused() => match (self.sql.editor.mode, self.sql.editor.vim) {
+                (crate::config::EditorMode::Classic, _) => Mode::Sql,
+                (_, editor::VimMode::Insert) => Mode::Insert,
+                (_, editor::VimMode::Visual) => Mode::Visual,
+                (_, editor::VimMode::VisualLine) => Mode::VisualLine,
+                (_, editor::VimMode::Normal) => Mode::Normal,
+            },
             _ if self.tab == Tab::Data && self.focus == Focus::Center => match self.data.visual {
                 Some(v) if v.line => Mode::VisualLine,
                 Some(_) => Mode::Visual,
@@ -427,6 +478,17 @@ impl App {
             }
             (Screen::Main, Focus::Center) if self.tab == Tab::Data => {
                 return vec![Context::Data, Context::Center, Context::Global];
+            }
+            (Screen::Main, Focus::Center) if self.tab == Tab::Sql => {
+                return match self.sql.focus {
+                    sql_tab::SqlFocus::Editor => vec![Context::SqlEditor, Context::Global],
+                    sql_tab::SqlFocus::Results => vec![
+                        Context::SqlResults,
+                        Context::Data,
+                        Context::Center,
+                        Context::Global,
+                    ],
+                };
             }
             (Screen::Main, Focus::Center) => Context::Center,
         };
@@ -472,6 +534,16 @@ impl App {
             }
             Msg::Notify(level, text) => {
                 self.notify(level, text);
+                Vec::new()
+            }
+            Msg::QueriesListed(names) => {
+                self.dirty = true;
+                self.on_queries_listed(names);
+                Vec::new()
+            }
+            Msg::QueryLoaded { name, text } => {
+                self.dirty = true;
+                self.on_query_loaded(name, text);
                 Vec::new()
             }
         }
@@ -569,6 +641,7 @@ impl App {
     }
 
     fn on_paste(&mut self, s: &str) {
+        let sql_editor = self.sql_editor_focused();
         match &mut self.overlay {
             Some(Overlay::Command(input)) | Some(Overlay::Password { input, .. }) => {
                 input.insert_str(s)
@@ -577,6 +650,11 @@ impl App {
                 self.tree.filter.insert_str(s);
                 self.filter_changed();
             }
+            Some(Overlay::CellEditor(ed)) => match &mut ed.input {
+                edit::EditorInput::Line(l) => l.insert_str(s),
+                edit::EditorInput::Multi(t) => t.insert_str(s),
+            },
+            None if sql_editor => self.on_sql_paste(s),
             _ => {}
         }
     }
@@ -590,6 +668,13 @@ impl App {
         if self.tree.filter_editing {
             self.on_filter_key(key);
             return Vec::new();
+        }
+        if self.screen == Screen::Main
+            && self.sql_editor_focused()
+            && !self.resolver.is_pending()
+            && let Some(effects) = self.on_sql_editor_key(key)
+        {
+            return effects;
         }
         let contexts = self.contexts();
         match self
@@ -639,7 +724,22 @@ impl App {
             _ => {}
         }
         if self.overlay.as_ref().is_some_and(Overlay::is_data) {
+            if self.tab == Tab::Sql {
+                return self
+                    .with_results(|app| app.on_data_overlay_key(key))
+                    .unwrap_or_else(|| {
+                        self.overlay = None;
+                        Vec::new()
+                    });
+            }
             return self.on_data_overlay_key(key);
+        }
+        match &self.overlay {
+            Some(Overlay::ConfirmWrites { .. }) => return self.on_confirm_writes_key(key),
+            Some(Overlay::ConfirmTxnExit(_)) => return self.on_confirm_txn_exit_key(key),
+            Some(Overlay::HistorySearch(_)) => return self.on_history_key(key),
+            Some(Overlay::QueryList { .. }) => return self.on_query_list_key(key),
+            _ => {}
         }
         let Some(overlay) = self.overlay.as_mut() else {
             return Vec::new();
@@ -672,7 +772,11 @@ impl App {
             | Overlay::Changes(_)
             | Overlay::ConfirmApply { .. }
             | Overlay::ConfirmDiscard
-            | Overlay::PendingChanges(_) => Vec::new(),
+            | Overlay::PendingChanges(_)
+            | Overlay::ConfirmWrites { .. }
+            | Overlay::ConfirmTxnExit(_)
+            | Overlay::HistorySearch(_)
+            | Overlay::QueryList { .. } => Vec::new(),
             Overlay::Error { .. } => {
                 if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) {
                     self.overlay = None;
@@ -730,6 +834,9 @@ impl App {
             Help => self.overlay = Some(Overlay::Help { scroll: 0 }),
             CommandPalette => self.overlay = Some(Overlay::Command(LineInput::default())),
             Interrupt => {
+                if let Some(effects) = self.cancel_sql() {
+                    return effects;
+                }
                 if let Some(effects) = self.cancel_data() {
                     return effects;
                 }
@@ -751,18 +858,27 @@ impl App {
                     Focus::Center => Focus::Tree,
                 }
             }
-            NextTab => self.tab = self.tab.cycle(1),
-            PrevTab => self.tab = self.tab.cycle(-1),
-            TabSchema => self.tab = Tab::Schema,
-            TabData => self.tab = Tab::Data,
-            TabSql => self.tab = Tab::Sql,
+            NextTab => self.switch_tab(self.tab.cycle(1)),
+            PrevTab => self.switch_tab(self.tab.cycle(-1)),
+            TabSchema => self.switch_tab(Tab::Schema),
+            TabData => self.switch_tab(Tab::Data),
+            TabSql => self.switch_tab(Tab::Sql),
             ReloadCatalog => return self.reload_catalog(),
             _ if self.focus == Focus::Tree => return self.dispatch_tree(action),
             _ if self.tab == Tab::Schema => return self.dispatch_schema(action),
             _ if self.tab == Tab::Data => return self.dispatch_data(action),
+            _ if self.tab == Tab::Sql => return self.dispatch_sql(action),
             _ => {}
         }
         Vec::new()
+    }
+
+    /// The SQL tab needs no object: it takes the focus (editor).
+    fn switch_tab(&mut self, tab: Tab) {
+        self.tab = tab;
+        if tab == Tab::Sql {
+            self.focus = Focus::Center;
+        }
     }
 
     fn dispatch_schema(&mut self, action: Action) -> Vec<Effect> {
@@ -1069,9 +1185,16 @@ impl App {
                     self.notify(Level::Error, format!("Connexion inconnue : {name}"));
                 }
             }
+            "save" | "w" => return self.save_query(arg),
+            "open" | "e" => return self.open_query(arg),
+            "history" => {
+                self.tab = Tab::Sql;
+                self.focus = Focus::Center;
+                return self.dispatch_sql(Action::HistorySearch);
+            }
             "schema" => self.tab = Tab::Schema,
             "data" => self.tab = Tab::Data,
-            "sql" => self.tab = Tab::Sql,
+            "sql" => self.switch_tab(Tab::Sql),
             other => self.notify(Level::Error, format!("Commande inconnue : {other}")),
         }
         Vec::new()
@@ -1086,6 +1209,9 @@ impl App {
             ("connect <nom>", "Ouvrir une connexion dans l'arbre"),
             ("reconnect", "Rouvrir la connexion courante"),
             ("disconnect", "Fermer la connexion courante"),
+            ("save [nom]", "Enregistrer la requête de l'onglet SQL"),
+            ("open [nom]", "Ouvrir une requête enregistrée"),
+            ("history", "Rechercher dans l'historique SQL"),
             ("schema | data | sql", "Changer d'onglet"),
         ]
     }
@@ -1103,6 +1229,9 @@ impl App {
             }
             ev @ (DbEvent::ChangesApplied { .. } | DbEvent::ChangesFailed { .. }) => {
                 self.on_apply_event(ev)
+            }
+            ev @ (DbEvent::StatementDone { .. } | DbEvent::StatementFailed { .. }) => {
+                self.on_sql_event(ev)
             }
             DbEvent::Discovered(servers) => {
                 self.on_discovered(servers);

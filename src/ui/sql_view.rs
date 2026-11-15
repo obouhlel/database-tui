@@ -50,7 +50,7 @@ fn token_style(kind: TokenKind, text: &str, t: &Theme) -> Style {
 }
 
 /// Removes the first `skip` display columns of a line.
-fn hscroll(spans: Vec<Span<'static>>, skip: usize) -> Vec<Span<'static>> {
+pub fn hscroll(spans: Vec<Span<'static>>, skip: usize) -> Vec<Span<'static>> {
     if skip == 0 {
         return spans;
     }

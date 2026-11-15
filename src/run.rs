@@ -93,6 +93,55 @@ fn run_effect(
             };
             let _ = app.update(msg);
         }
+        Effect::AppendHistory(entry) => {
+            if let Some(dir) = &app.data_dir {
+                let path = crate::storage::history_path(dir);
+                if let Err(e) = crate::storage::append_history(&path, &entry) {
+                    tracing::warn!("history not saved: {e:#}");
+                }
+            }
+        }
+        Effect::SaveQuery { name, text } => {
+            let msg = match &app.data_dir {
+                Some(dir) => match crate::storage::save_query(
+                    &crate::storage::queries_dir(dir),
+                    &name,
+                    &text,
+                ) {
+                    Ok(path) => Msg::Notify(
+                        Level::Success,
+                        format!("Requête enregistrée : {}", path.display()),
+                    ),
+                    Err(e) => {
+                        Msg::Notify(Level::Error, format!("Enregistrement impossible : {e:#}"))
+                    }
+                },
+                None => Msg::Notify(Level::Error, "Répertoire de données inconnu".into()),
+            };
+            let _ = app.update(msg);
+        }
+        Effect::LoadQuery(name) => {
+            let msg = match &app.data_dir {
+                Some(dir) => {
+                    match crate::storage::load_query(&crate::storage::queries_dir(dir), &name) {
+                        Ok(text) => Msg::QueryLoaded { name, text },
+                        Err(e) => {
+                            Msg::Notify(Level::Error, format!("Ouverture impossible : {e:#}"))
+                        }
+                    }
+                }
+                None => Msg::Notify(Level::Error, "Répertoire de données inconnu".into()),
+            };
+            let _ = app.update(msg);
+        }
+        Effect::ListQueries => {
+            let names = app
+                .data_dir
+                .as_ref()
+                .map(|d| crate::storage::list_queries(&crate::storage::queries_dir(d)))
+                .unwrap_or_default();
+            let _ = app.update(Msg::QueriesListed(names));
+        }
         Effect::Copy(text) => match clipboard.copy(&text) {
             Ok(method) => tracing::debug!(bytes = text.len(), method, "copied"),
             Err(e) => {

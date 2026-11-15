@@ -58,7 +58,7 @@ color = "cyan"
 # color = "red"
 
 # Surcharge des raccourcis : [keymap.<contexte>] <action> = "touche" | ["t1", "t2"]
-# Contextes : global, picker, tree, center. `?` dans l'appli liste les actions.
+# Contextes : global, picker, tree, center, schema, data, sql_editor, sql_results. `?` liste les actions.
 # Notation : "ctrl+p", "alt+enter", "shift+tab", "f5", "space", "gg" (séquence).
 # [keymap.global]
 # quit = ["q", "ctrl+q"]

@@ -1426,3 +1426,82 @@ mod staging {
         drop(&client, &object).await;
     }
 }
+
+// ------------------------------------------------------------ SQL tab
+
+mod sql_tab {
+    use super::*;
+
+    #[tokio::test]
+    async fn select_returns_typed_text_rows() {
+        let Some(url) = test_url() else { return };
+        let backend = db::connect(&request(&url), no_lost()).await.unwrap();
+        let r = backend
+            .execute(
+                "select id, email, null::jsonb as j from shop.customers order by id limit 3",
+                100,
+            )
+            .await
+            .unwrap();
+        let names: Vec<_> = r
+            .columns
+            .iter()
+            .map(|c| (c.name.as_str(), c.data_type.as_str()))
+            .collect();
+        assert_eq!(names, [("id", "int8"), ("email", "text"), ("j", "jsonb")]);
+        assert_eq!(r.rows.len(), 3);
+        assert_eq!(r.rows[0][0].as_deref(), Some("1"));
+        assert_eq!(r.rows[0][2], None);
+        assert!(r.returns_rows && !r.truncated);
+        assert_eq!(r.row_count, 3);
+
+        let r = backend
+            .execute("select generate_series(1, 50)", 10)
+            .await
+            .unwrap();
+        assert_eq!((r.rows.len(), r.truncated, r.row_count), (10, true, 50));
+        let r = backend.execute("select 1 where false", 10).await.unwrap();
+        assert!(r.returns_rows && r.rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn errors_carry_the_position() {
+        let Some(url) = test_url() else { return };
+        let backend = db::connect(&request(&url), no_lost()).await.unwrap();
+        let e = backend
+            .execute("select nope from shop.customers", 10)
+            .await
+            .unwrap_err();
+        assert!(e.message.contains("nope"), "{e}");
+        assert_eq!(e.position, Some(8));
+    }
+
+    #[tokio::test]
+    async fn manual_transaction_spans_statements() {
+        let Some(url) = test_url() else { return };
+        let backend = db::connect(&request(&url), no_lost()).await.unwrap();
+        backend.execute("begin", 10).await.unwrap();
+        backend
+            .execute("create temp table tx_probe (a int) on commit drop", 10)
+            .await
+            .unwrap();
+        let r = backend
+            .execute("insert into tx_probe values (1), (2)", 10)
+            .await
+            .unwrap();
+        assert!(!r.returns_rows);
+        assert_eq!(r.row_count, 2);
+        let r = backend
+            .execute("update tx_probe set a = a + 1 returning a", 10)
+            .await
+            .unwrap();
+        assert_eq!(r.rows.len(), 2);
+        // An error aborts the transaction until ROLLBACK.
+        assert!(backend.execute("select 1/0", 10).await.is_err());
+        let e = backend.execute("select 1", 10).await.unwrap_err();
+        assert!(e.message.contains("aborted"), "{e}");
+        backend.execute("rollback", 10).await.unwrap();
+        backend.execute("select 1", 10).await.unwrap();
+        assert!(backend.execute("select * from tx_probe", 10).await.is_err());
+    }
+}

@@ -114,8 +114,8 @@ impl App {
     /// Before leaving the table: `true` if the action must wait (the user is
     /// asked to apply or discard pending changes).
     pub(super) fn guard(&mut self, after: After) -> bool {
-        if self.data.staging.is_empty() {
-            return false;
+        if self.results_mode || self.data.staging.is_empty() {
+            return self.guard_transaction(&after);
         }
         let same_table = match &after {
             After::Open(o) | After::Follow(o) => self.data.is_for(o),
@@ -124,13 +124,13 @@ impl App {
             After::Quit => false,
         };
         if same_table {
-            return false;
+            return self.guard_transaction(&after);
         }
         self.overlay = Some(Overlay::PendingChanges(after));
         true
     }
 
-    fn perform(&mut self, after: After) -> Vec<Effect> {
+    pub(super) fn perform_after(&mut self, after: After) -> Vec<Effect> {
         match after {
             After::Open(o) => self.open_object(o),
             After::Follow(o) => {
@@ -143,7 +143,11 @@ impl App {
                 Some(prev) => self.go_to(prev),
                 None => self.notify(Level::Info, "Pas d'objet précédent"),
             },
-            After::Quit => self.should_quit = true,
+            After::Quit => {
+                if !self.guard(After::Quit) {
+                    self.should_quit = true;
+                }
+            }
             After::Disconnect(n) => return self.disconnect(&n),
         }
         Vec::new()
@@ -590,6 +594,17 @@ impl App {
             self.notify(Level::Info, "Application déjà en cours…");
             return;
         }
+        let in_txn = self.sql.txn != super::sql_tab::TxnState::Idle
+            && self.data.object.as_ref().is_some_and(|o| {
+                self.sql.target.as_ref() == Some(&(o.connection.clone(), o.database.clone()))
+            });
+        if in_txn {
+            self.notify(
+                Level::Warning,
+                "Transaction SQL ouverte sur cette base : terminez-la (COMMIT ou ROLLBACK) avant d'appliquer",
+            );
+            return;
+        }
         let production = self
             .data
             .object
@@ -712,7 +727,7 @@ impl App {
             }
             KeyCode::Char('x') => {
                 self.data.staging.clear();
-                return self.perform(after);
+                return self.perform_after(after);
             }
             KeyCode::Char('D') => {
                 if let Some(v) = self.changes_view() {
@@ -752,7 +767,7 @@ impl App {
                     format!("Appliqué en une transaction : {}", counts.describe()),
                 );
                 if let Some(after) = self.after_apply.take() {
-                    return self.perform(after);
+                    return self.perform_after(after);
                 }
             }
             DbEvent::ChangesFailed { id, error } if self.data.applying == Some(id) => {

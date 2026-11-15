@@ -114,7 +114,19 @@ impl App {
 
     pub(super) fn dispatch_data(&mut self, action: Action) -> Vec<Effect> {
         use Action::*;
-        if self.current.as_ref().is_none_or(|o| !self.data.is_for(o)) {
+        if !self.results_mode && self.current.as_ref().is_none_or(|o| !self.data.is_for(o)) {
+            return Vec::new();
+        }
+        if self.results_mode
+            && matches!(
+                action,
+                FilterEditor | FreeWhere | ClearFilters | Sort | ClearSort | Refresh
+            )
+        {
+            self.notify(
+                Level::Info,
+                "Sur un résultat de requête : modifiez la requête (ORDER BY, WHERE) et relancez-la",
+            );
             return Vec::new();
         }
         if matches!(

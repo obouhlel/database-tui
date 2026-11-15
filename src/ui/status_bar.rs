@@ -78,8 +78,15 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
         Mode::Search => t.matched,
         Mode::Visual | Mode::VisualLine => t.schema,
         Mode::Edit => t.warning,
-        Mode::Insert => t.success,
+        Mode::Insert | Mode::Sql => t.success,
     };
+    match app.sql.txn {
+        crate::app::sql_tab::TxnState::Open => left.push(badge(" TRANSACTION ", t.warning)),
+        crate::app::sql_tab::TxnState::Aborted => {
+            left.push(badge(" TRANSACTION EN ÉCHEC ", t.error))
+        }
+        crate::app::sql_tab::TxnState::Idle => {}
+    }
     if let Some(c) = app.pending_changes() {
         left.push(badge(&format!(" {} en attente ", c.total()), t.warning));
     }
@@ -196,6 +203,61 @@ pub fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
                     (hint(Context::Data, Action::Cancel), "annuler la sélection"),
                 ]
             }
+            (Screen::Main, Focus::Center)
+                if app.tab == crate::app::Tab::Sql
+                    && app.sql.focus == crate::app::sql_tab::SqlFocus::Editor =>
+            {
+                let two = |a: Action| {
+                    km.keys_for(Context::SqlEditor, a)
+                        .into_iter()
+                        .take(3)
+                        .collect::<Vec<_>>()
+                        .join("/")
+                };
+                let palette = km
+                    .keys_for(Context::Global, Action::CommandPalette)
+                    .into_iter()
+                    .find(|k| k.starts_with("Ctrl"))
+                    .unwrap_or_else(|| hint(Context::Global, Action::CommandPalette));
+                let mut v = vec![
+                    (two(Action::ExecuteStatement), "exécuter"),
+                    (hint(Context::SqlEditor, Action::ExecuteScript), "script"),
+                    (
+                        hint(Context::SqlEditor, Action::HistorySearch),
+                        "historique",
+                    ),
+                    (hint(Context::SqlEditor, Action::FocusResults), "résultats"),
+                    (hint(Context::Global, Action::FocusTree), "arbre"),
+                    (palette, "commande"),
+                ];
+                if app.sql.running.is_some() {
+                    v.insert(
+                        0,
+                        (
+                            hint(Context::Global, Action::Interrupt),
+                            "annuler la requête",
+                        ),
+                    );
+                }
+                v
+            }
+            (Screen::Main, Focus::Center) if app.tab == crate::app::Tab::Sql => vec![
+                (hint(Context::SqlResults, Action::FocusEditor), "éditeur"),
+                (
+                    format!(
+                        "{}/{}",
+                        hint(Context::SqlResults, Action::PrevResult),
+                        hint(Context::SqlResults, Action::NextResult)
+                    ),
+                    "résultats",
+                ),
+                (hint(Context::Data, Action::Detail), "détail"),
+                (hint(Context::Data, Action::Search), "chercher"),
+                (hint(Context::Data, Action::Copy), "copier"),
+                (hint(Context::Data, Action::CopyAs), "copier comme…"),
+                (hint(Context::Data, Action::Visual), "sélection"),
+                (hint(Context::Global, Action::Help), "aide"),
+            ],
             (Screen::Main, Focus::Center)
                 if app.tab == crate::app::Tab::Data && app.pending_changes().is_some() =>
             {

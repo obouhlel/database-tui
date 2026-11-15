@@ -6,6 +6,7 @@ pub mod catalog;
 pub mod changes;
 pub mod data;
 pub mod discover;
+pub mod exec;
 pub mod postgres;
 pub mod schema;
 pub mod tunnel;

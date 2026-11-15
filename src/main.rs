@@ -95,6 +95,8 @@ fn real_main(cli: Cli) -> Result<()> {
     let mouse = config.general.mouse;
     let mut app = App::new(config, keymap, theme, warnings, extra, start);
     app.config_path = Some(config_path.clone());
+    app.sql.history = pgtui::storage::load_history(&pgtui::storage::history_path(&paths.data_dir));
+    app.data_dir = Some(paths.data_dir.clone());
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

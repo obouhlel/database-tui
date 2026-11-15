@@ -17,6 +17,7 @@ use super::catalog::{Catalog, DatabaseInfo, ObjectRef};
 use super::changes::{ApplyError, ChangeCounts, ChangeSet};
 use super::data::{DataRequest, RowCount, TextRows};
 use super::discover::{self, DiscoveredServer};
+use super::exec::{ExecError, StatementResult};
 use super::schema::ObjectDetails;
 use super::{Backend, ConnectError, ConnectRequest, ServerInfo};
 use crate::config::password;
@@ -56,6 +57,14 @@ pub enum DbCommand {
         id: u64,
         object: ObjectRef,
         sql: String,
+    },
+    /// Run one statement of the SQL tab.
+    Execute {
+        id: u64,
+        connection: String,
+        database: String,
+        sql: String,
+        max_rows: usize,
     },
     /// Cancel the query running on the session connection of a database.
     Cancel {
@@ -130,6 +139,16 @@ pub enum DbEvent {
     ChangesFailed {
         id: u64,
         error: ApplyError,
+    },
+    StatementDone {
+        id: u64,
+        result: Box<StatementResult>,
+        elapsed: Duration,
+    },
+    StatementFailed {
+        id: u64,
+        error: ExecError,
+        elapsed: Duration,
     },
     Discovered(Vec<DiscoveredServer>),
     /// A step of a long operation (opening a tunnel, connecting).
@@ -379,6 +398,44 @@ async fn run(mut commands: UnboundedReceiver<DbCommand>, events: UnboundedSender
                                 elapsed: started.elapsed(),
                             },
                             Err(error) => DbEvent::ChangesFailed { id, error },
+                        },
+                    );
+                });
+            }
+            DbCommand::Execute {
+                id,
+                connection,
+                database,
+                sql,
+                max_rows,
+            } => {
+                let p = pool(&pools, &connection);
+                let events = events.clone();
+                tokio::spawn(async move {
+                    let started = Instant::now();
+                    let result = match p {
+                        None => Err(ExecError {
+                            message: "non connecté".into(),
+                            position: None,
+                        }),
+                        Some(p) => match p.get(&database).await {
+                            Ok(b) => b.execute(&sql, max_rows).await,
+                            Err(e) => Err(ExecError {
+                                message: e.to_string(),
+                                position: None,
+                            }),
+                        },
+                    };
+                    let elapsed = started.elapsed();
+                    send(
+                        &events,
+                        match result {
+                            Ok(result) => DbEvent::StatementDone {
+                                id,
+                                result: Box::new(result),
+                                elapsed,
+                            },
+                            Err(error) => DbEvent::StatementFailed { id, error, elapsed },
                         },
                     );
                 });

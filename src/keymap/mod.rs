@@ -26,16 +26,23 @@ pub enum Context {
     Schema,
     /// Center panel, Data tab.
     Data,
+    /// SQL tab, editor (only keys with Ctrl / Alt or function keys while
+    /// typing; everything the editor ignores in vim normal mode).
+    SqlEditor,
+    /// SQL tab, results (on top of the Data tab keys).
+    SqlResults,
 }
 
 impl Context {
-    pub const ALL: [Context; 6] = [
+    pub const ALL: [Context; 8] = [
         Context::Global,
         Context::Picker,
         Context::Tree,
         Context::Center,
         Context::Schema,
         Context::Data,
+        Context::SqlEditor,
+        Context::SqlResults,
     ];
 
     pub fn name(self) -> &'static str {
@@ -46,6 +53,8 @@ impl Context {
             Context::Center => "center",
             Context::Schema => "schema",
             Context::Data => "data",
+            Context::SqlEditor => "sql_editor",
+            Context::SqlResults => "sql_results",
         }
     }
 
@@ -57,6 +66,8 @@ impl Context {
             Context::Center => "Panneau central",
             Context::Schema => "Onglet Schema",
             Context::Data => "Onglet Data",
+            Context::SqlEditor => "Onglet SQL : éditeur",
+            Context::SqlResults => "Onglet SQL : résultats",
         }
     }
 
@@ -162,6 +173,13 @@ actions! {
     ShowChanges => "show_changes", "Changements en attente (diff, SQL généré)";
     ApplyChanges => "apply_changes", "Appliquer les changements (une transaction)";
     DiscardChanges => "discard_changes", "Abandonner tous les changements";
+    ExecuteStatement => "execute_statement", "Exécuter l'instruction sous le curseur (ou la sélection)";
+    ExecuteScript => "execute_script", "Exécuter tout le script";
+    HistorySearch => "history_search", "Rechercher dans l'historique";
+    FocusResults => "focus_results", "Aller aux résultats";
+    FocusEditor => "focus_editor", "Revenir à l'éditeur";
+    NextResult => "next_result", "Résultat suivant";
+    PrevResult => "prev_result", "Résultat précédent";
 }
 
 #[derive(Debug, Clone)]
@@ -255,6 +273,20 @@ fn defaults() -> Vec<(Context, Action, &'static [&'static str])> {
         (Data, ShowChanges, &["D"]),
         (Data, ApplyChanges, &["ctrl+s"]),
         (Data, DiscardChanges, &["ctrl+z", "X"]),
+        (
+            SqlEditor,
+            ExecuteStatement,
+            &["ctrl+enter", "alt+enter", "ctrl+e"],
+        ),
+        (SqlEditor, ExecuteScript, &["ctrl+shift+enter", "f5"]),
+        (SqlEditor, HistorySearch, &["ctrl+r"]),
+        (SqlEditor, FocusResults, &["ctrl+j"]),
+        (SqlResults, FocusEditor, &["i", "ctrl+k"]),
+        (SqlResults, NextResult, &["]"]),
+        (SqlResults, PrevResult, &["["]),
+        (SqlResults, ExecuteStatement, &["ctrl+e", "alt+enter"]),
+        (SqlResults, ExecuteScript, &["f5"]),
+        (SqlResults, HistorySearch, &["ctrl+r"]),
         (Data, Cancel, &["esc"]),
     ];
     for ctx in [Picker, Tree, Center, Schema, Data] {
@@ -339,6 +371,18 @@ impl Keymap {
             }
         }
         Lookup { exact, is_prefix }
+    }
+
+    /// Action of a single key (no sequence), looking in `contexts` in order.
+    pub fn single(&self, contexts: &[Context], chord: &KeyChord) -> Option<Action> {
+        contexts.iter().find_map(|ctx| {
+            self.bindings
+                .get(ctx)
+                .into_iter()
+                .flatten()
+                .find(|b| b.seq.len() == 1 && &b.seq[0] == chord)
+                .map(|b| b.action)
+        })
     }
 
     /// Keys bound to `action` in `ctx`, for display.

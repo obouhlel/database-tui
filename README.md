@@ -2,8 +2,8 @@
 
 Client PostgreSQL en mode texte (TUI), entièrement pilotable au clavier — une alternative légère à DBeaver pour l'usage quotidien.
 
-> **État : jalon 4 / 6** — arbre des connexions (plusieurs ouvertes à la fois), onglet Schema, onglet Data (pagination serveur, tri, filtres, recherche, détail, copie) et édition avec staging, diff, commit transactionnel et détection de conflits.
-> L'onglet SQL arrive au jalon suivant (voir [Feuille de route](#feuille-de-route)).
+> **État : jalon 5 / 6** — arbre des connexions (plusieurs ouvertes à la fois), onglet Schema, onglet Data (pagination serveur, tri, filtres, recherche, détail, copie, édition avec staging, diff, commit transactionnel et détection de conflits) et onglet SQL (éditeur classique ou vim, exécution, résultats, transactions manuelles, historique, requêtes enregistrées).
+> Autocomplétion, EXPLAIN et export arrivent au dernier jalon (voir [Feuille de route](#feuille-de-route)).
 
 ## Captures
 
@@ -16,6 +16,8 @@ Client PostgreSQL en mode texte (TUI), entièrement pilotable au clavier — une
 | ![Tri et sélection](docs/screenshots/13-data-tri.png) | ![Connexion de production](docs/screenshots/08-prod.png) |
 | ![Changements en attente](docs/screenshots/22-edition-grille.png) | ![Diff avant / après](docs/screenshots/23-diff.png) |
 | ![SQL généré](docs/screenshots/24-sql-genere.png) | ![Conflit détecté](docs/screenshots/26-conflit.png) |
+| ![Onglet SQL : résultat](docs/screenshots/30-sql-resultat.png) | ![Onglet SQL : transaction manuelle](docs/screenshots/34-sql-transaction.png) |
+| ![Onglet SQL : erreur positionnée](docs/screenshots/31-sql-erreur.png) | ![Onglet SQL : historique](docs/screenshots/32-sql-historique.png) |
 | ![Plusieurs connexions ouvertes](docs/screenshots/19-multi-connexions.png) | ![Page des connexions](docs/screenshots/01-selecteur.png) |
 
 Captures du vrai binaire, régénérables avec `scripts/screenshots/capture.sh` (tmux, Python, Node + Playwright, base de démo lancée).
@@ -85,6 +87,20 @@ Rien n'est écrit en base tant que vous n'avez pas validé : chaque modification
 - `Ctrl+z` ou `X` abandonne tous les changements (avec confirmation ; `u` les restaure).
 - L'édition demande une clé primaire, ou une contrainte unique sur des colonnes `NOT NULL` ; sinon, et sur les vues ou les connexions `read_only`, l'en-tête indique pourquoi la table est en lecture seule.
 - Le staging est propre à une table : ouvrir un autre objet, fermer la connexion ou quitter avec des changements en attente propose de les appliquer (`a`), de les abandonner (`x`) ou de rester (`Esc`).
+
+## Onglet SQL
+
+- **Éditeur** avec coloration, numéros de ligne, indentation automatique (un niveau de plus après une parenthèse ouvrante), annuler / rétablir. Deux jeux de touches au choix dans `[editor] mode` :
+  - `classic` (défaut) : toujours en saisie ; `Shift` + flèches sélectionne, `Ctrl+z` / `Ctrl+y` annule / rétablit, `Ctrl+x` / `Ctrl+c` / `Ctrl+v` coupe / copie / colle, `Ctrl+a` sélectionne tout, `Ctrl+d` duplique la ligne, `Tab` / `Shift+Tab` indente la sélection. `Esc` passe aux résultats.
+  - `vim` : modes normal / insertion / visuel (`v`, `V`) ; mouvements `h j k l w b e 0 ^ $ gg G` ; opérateurs `d c y` avec un mouvement, `dd cc yy D C x X J p P >> <<` ; `u` / `Ctrl+r`. En mode normal, les touches que vim n'utilise pas restent celles de l'appli (`q`, `:`, `?`, `Tab`, `1`/`2`/`3`).
+- **Exécution** : `Ctrl+Entrée` (ou `Ctrl+e`, `Alt+Entrée`) exécute l'instruction sous le curseur, ou toutes les instructions de la sélection ; `Ctrl+Shift+Entrée` ou `F5` exécute tout le script. Les instructions partent une par une (découpage sur `;` en respectant chaînes, commentaires, `$$…$$` et corps `BEGIN ATOMIC`), et le script s'arrête à la première erreur. Le curseur se place alors sur la position signalée par le serveur.
+- **Résultats** : un sous-onglet par instruction (`[` / `]`), dans le même tableau que l'onglet Data (navigation, recherche `/`, sélection, copie dans tous les formats, vue détail). Les nombres sont alignés selon leur type. Au plus 10 000 lignes sont gardées par résultat (le nombre total est indiqué). `Ctrl+j` va aux résultats, `i` ou `Ctrl+k` revient à l'éditeur.
+- **Cible** : la base de l'objet ouvert ou de la sélection dans l'arbre, affichée en tête de l'onglet. Les requêtes passent par la connexion `session` de cette base : une requête longue y fait attendre l'onglet Data. `Ctrl+c` annule la requête (`pg_cancel_backend` via le jeton d'annulation). Le `statement_timeout` de la configuration s'applique.
+- **Transactions manuelles** : `BEGIN`, `COMMIT`, `ROLLBACK` s'exécutent tels quels. La barre de statut et l'en-tête affichent « TRANSACTION » (et « TRANSACTION EN ÉCHEC » après une erreur, jusqu'au `ROLLBACK`). La cible reste fixe tant que la transaction est ouverte. Quitter ou fermer la connexion pendant une transaction demande confirmation (le serveur l'annule). L'application des changements de l'onglet Data est refusée sur une base où une transaction SQL est ouverte.
+- **Garde-fou** : un `UPDATE` ou un `DELETE` sans `WHERE` (hors sous-requêtes) demande une confirmation explicite avant l'exécution.
+- **Historique** persistant dans `~/.local/share/pgtui/history` (une ligne JSON par instruction : date, connexion, base, texte, succès, durée ; fichier en mode 600 ; 5 000 entrées). `Ctrl+r` (ou `:history`) ouvre une recherche floue, avec aperçu ; `Entrée` insère l'instruction dans l'éditeur.
+- **Requêtes enregistrées** dans `~/.local/share/pgtui/queries/<nom>.sql` : `:save <nom>` (ou `:w`, sans nom pour réenregistrer), `:open <nom>` (ou `:e`), `:open` seul pour choisir dans la liste.
+- Non encore fait : rendre éditables les résultats d'un `SELECT` sur une seule table (prévu avec les finitions du jalon 6).
 
 ## Lancement
 
@@ -238,6 +254,13 @@ Couleurs : noms (`red`, `light-blue`, `orange`…), `#rrggbb` ou index ANSI (`20
 | | `y`, `yy`, `Y` | Copier la cellule (ou la sélection), la ligne, ou la sélection au choix TSV / CSV / JSON / INSERT |
 | | `<` / `>` / `=`, `-` / `+` | Rétrécir / élargir / largeur auto, masquer la colonne / tout réafficher |
 | | `R`, `Ctrl+c` | Relancer la requête, annuler une requête en cours |
+| Onglet SQL | `Ctrl+Entrée` · `Ctrl+e` · `Alt+Entrée` | Exécuter l'instruction sous le curseur (ou la sélection) |
+| | `Ctrl+Shift+Entrée` · `F5` | Exécuter tout le script |
+| | `Ctrl+r` | Historique (recherche floue) |
+| | `Ctrl+j` · `Esc` (classique) / `i` · `Ctrl+k` | Aller aux résultats / revenir à l'éditeur |
+| | `[` / `]` | Résultat précédent / suivant |
+| | `Ctrl+c` | Annuler la requête en cours |
+| | `Alt+1/2/3` · `Ctrl+h` · `Ctrl+p` | Changer d'onglet, aller à l'arbre, ligne de commande (depuis l'éditeur) |
 | Édition | `e` · `i` | Modifier la cellule (`Entrée` valider, `Tab` suivante, `Esc` annuler, `Ctrl+n` NULL, `Ctrl+d` DEFAULT, `Alt+Entrée` multi-ligne) |
 | | `o` | Nouvelle ligne |
 | | `dd` | Marquer / démarquer la ligne (ou la sélection) pour suppression |
@@ -248,7 +271,7 @@ Couleurs : noms (`red`, `light-blue`, `orange`…), `#rrggbb` ou index ANSI (`20
 
 **Presse-papier** — `auto` utilise le presse-papier système (X11, Wayland, macOS, Windows) et bascule sur la séquence OSC 52 (copie via le terminal) en SSH ou si le presse-papier système est indisponible. Sous tmux, OSC 52 demande `set -g set-clipboard on`.
 
-Commandes : `:q`, `:help`, `:reload`, `:connect <nom>`, `:connections`, `:reconnect`, `:disconnect`, `:schema`, `:data`, `:sql`.
+Commandes : `:q` (`:q!` sans confirmation), `:help`, `:reload`, `:connect <nom>`, `:connections`, `:reconnect`, `:disconnect`, `:save [nom]`, `:open [nom]`, `:history`, `:schema`, `:data`, `:sql`.
 
 Les terminaux compatibles avec le protocole clavier kitty (kitty, WezTerm, Ghostty, foot, Alacritty récent) distinguent `Ctrl+Enter` d'`Enter` ; pgtui l'active automatiquement. Ailleurs (tmux, gnome-terminal), des touches de repli seront toujours proposées.
 
@@ -261,7 +284,8 @@ src/
 ├── terminal.rs      raw mode / écran alternatif, restauration garantie (Drop + hook de panic)
 ├── clipboard.rs     presse-papier système + repli OSC 52
 ├── config/          config.toml (serde), mots de passe, ~/.pgpass
-├── sql/             quoting des identifiants/littéraux, lexer SQL (coloration, découpage)
+├── sql/             quoting des identifiants/littéraux, lexer SQL (coloration), découpage des scripts
+├── storage.rs       historique et requêtes enregistrées (répertoire de données)
 ├── db/
 │   ├── backend.rs   trait Backend (un moteur = une implémentation)
 │   ├── catalog.rs   modèle neutre des objets (schémas, tables, vues…)
@@ -301,7 +325,7 @@ Sans `PGTUI_TEST_DATABASE_URL`, les tests d'intégration sont ignorés avec un m
 - [x] **Jalon 2** — onglet Schema : colonnes, index, contraintes, triggers, FK entrantes/sortantes (navigation), DDL coloré et copiable, statistiques
 - [x] **Jalon 3** — onglet Data en lecture : tableau virtualisé, pagination serveur, tri, recherche, filtres, vue détail, copie
 - [x] **Jalon 4** — édition, staging, vue diff, commit transactionnel, détection de conflits
-- [ ] **Jalon 5** — onglet SQL : éditeur, exécution, résultats, historique, annulation, transactions manuelles
+- [x] **Jalon 5** — onglet SQL : éditeur, exécution, résultats, historique, annulation, transactions manuelles
 - [ ] **Jalon 6** — autocomplétion, EXPLAIN, export, finitions
 
 ## Licence

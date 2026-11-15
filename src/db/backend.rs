@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use super::catalog::{Catalog, DatabaseInfo, ObjectRef};
 use super::changes::{ApplyError, ChangeCounts, ChangeSet};
 use super::data::{DataRequest, RowCount, TextRows};
+use super::exec::{ExecError, StatementResult};
 use super::schema::ObjectDetails;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +64,11 @@ pub trait Backend: Send + Sync {
     /// Runs a script written or edited by the user in one transaction
     /// (rolled back on error).
     async fn run_script(&self, sql: &str) -> anyhow::Result<()>;
+
+    /// Runs one statement typed by the user on the session connection,
+    /// keeping at most `max_rows` rows. Transaction control (`BEGIN`,
+    /// `COMMIT`, ...) is the user's: no implicit transaction is added.
+    async fn execute(&self, sql: &str, max_rows: usize) -> Result<StatementResult, ExecError>;
 
     /// Asks the server to cancel the query running on the session connection.
     async fn cancel(&self) -> anyhow::Result<()>;

@@ -23,6 +23,7 @@ use super::backend::{Backend, BackendKind, ServerInfo};
 use super::catalog::{Catalog, DatabaseInfo, ObjectRef};
 use super::changes::{ApplyError, ChangeCounts, ChangeSet};
 use super::data::{DataRequest, RowCount, TextRows};
+use super::exec::{ExecError, ResultColumn, StatementResult};
 use super::schema::ObjectDetails;
 use super::{ConnectError, ConnectRequest};
 use crate::config::SslMode;
@@ -323,9 +324,101 @@ impl Backend for PgBackend {
         }
     }
 
+    async fn execute(&self, sql: &str, max_rows: usize) -> Result<StatementResult, ExecError> {
+        use futures::StreamExt;
+        use tokio_postgres::SimpleQueryMessage;
+
+        let _guard = self.session_lock.lock().await;
+        // Column types come from preparing the statement (the simple query
+        // protocol, which returns every value as text, does not give them).
+        // Only for statements that can return rows: a failed Parse inside a
+        // transaction would abort it.
+        let verb = crate::sql::script::verb(sql).to_ascii_lowercase();
+        let may_return = matches!(
+            verb.as_str(),
+            "select"
+                | "with"
+                | "values"
+                | "table"
+                | "show"
+                | "explain"
+                | "fetch"
+                | "insert"
+                | "update"
+                | "delete"
+                | "merge"
+                | "call"
+                | "returning"
+        );
+        let types: Option<Vec<String>> = if may_return {
+            match self.session.prepare(sql).await {
+                Ok(st) => Some(
+                    st.columns()
+                        .iter()
+                        .map(|c| c.type_().name().to_string())
+                        .collect(),
+                ),
+                Err(e) if e.as_db_error().is_some() => return Err(exec_error(e)),
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+        let stream = self
+            .session
+            .simple_query_raw(sql)
+            .await
+            .map_err(exec_error)?;
+        futures::pin_mut!(stream);
+        let mut result = StatementResult::default();
+        while let Some(msg) = stream.next().await {
+            match msg.map_err(exec_error)? {
+                SimpleQueryMessage::RowDescription(cols) => {
+                    result.returns_rows = true;
+                    result.columns = cols
+                        .iter()
+                        .enumerate()
+                        .map(|(i, c)| ResultColumn {
+                            name: c.name().to_string(),
+                            data_type: types
+                                .as_ref()
+                                .and_then(|t| t.get(i).cloned())
+                                .unwrap_or_default(),
+                        })
+                        .collect();
+                }
+                SimpleQueryMessage::Row(row) => {
+                    if result.rows.len() < max_rows {
+                        result.rows.push(
+                            (0..row.len())
+                                .map(|i| row.get(i).map(str::to_string))
+                                .collect(),
+                        );
+                    } else {
+                        result.truncated = true;
+                    }
+                }
+                SimpleQueryMessage::CommandComplete(n) => result.row_count = n,
+                _ => {}
+            }
+        }
+        Ok(result)
+    }
+
     async fn cancel(&self) -> anyhow::Result<()> {
         self.cancel.cancel_query(self.tls.clone()).await?;
         Ok(())
+    }
+}
+
+fn exec_error(e: tokio_postgres::Error) -> ExecError {
+    let position = e.as_db_error().and_then(|d| match d.position() {
+        Some(tokio_postgres::error::ErrorPosition::Original(p)) => Some(*p),
+        _ => None,
+    });
+    ExecError {
+        message: format!("{:#}", pg_error(e)),
+        position,
     }
 }
 

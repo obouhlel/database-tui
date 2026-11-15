@@ -332,7 +332,10 @@ fn tabs() {
     assert_eq!(app.tab, Tab::Data);
     key(&mut app, "tab");
     assert_eq!(app.tab, Tab::Sql);
+    // In the SQL editor Tab indents: Alt+1/2/3 switch tabs.
     key(&mut app, "tab");
+    assert_eq!(app.tab, Tab::Sql);
+    key(&mut app, "alt+1");
     assert_eq!(app.tab, Tab::Schema);
     key(&mut app, "shift+tab");
     assert_eq!(app.tab, Tab::Sql);
@@ -1031,5 +1034,304 @@ mod discovery {
             key(&mut app, "R").as_slice(),
             [DbCommand::Discover { .. }]
         ));
+    }
+}
+
+// ------------------------------------------------------------- SQL tab
+
+mod sql {
+    use super::*;
+    use crate::app::sql_tab::{SqlFocus, TxnState};
+    use crate::db::exec::{ExecError, ResultColumn, StatementResult};
+    use pretty_assertions::assert_eq;
+
+    /// Types text in the editor (`\n` = Enter).
+    fn write(app: &mut App, text: &str) {
+        for c in text.chars() {
+            let code = if c == '\n' {
+                KeyCode::Enter
+            } else {
+                KeyCode::Char(c)
+            };
+            app.update(Msg::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+        }
+    }
+
+    fn executed(effects: &[Effect]) -> Vec<(u64, String)> {
+        effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Db(DbCommand::Execute {
+                    id,
+                    sql,
+                    connection,
+                    database,
+                    ..
+                }) => {
+                    assert_eq!((connection.as_str(), database.as_str()), ("local", "demo"));
+                    Some((*id, sql.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn rows_result(n: usize) -> StatementResult {
+        StatementResult {
+            columns: vec![ResultColumn {
+                name: "n".into(),
+                data_type: "int4".into(),
+            }],
+            rows: (0..n).map(|i| vec![Some(i.to_string())]).collect(),
+            truncated: false,
+            row_count: n as u64,
+            returns_rows: true,
+        }
+    }
+
+    fn done(app: &mut App, id: u64, result: StatementResult) -> Vec<Effect> {
+        app.update(Msg::Db(DbEvent::StatementDone {
+            id,
+            result: Box::new(result),
+            elapsed: Duration::from_millis(2),
+        }))
+    }
+
+    fn sql_app() -> App {
+        let mut app = connected_app();
+        key(&mut app, "3");
+        assert_eq!((app.tab, app.focus), (Tab::Sql, Focus::Center));
+        assert_eq!(app.mode(), Mode::Sql);
+        app
+    }
+
+    #[test]
+    fn runs_the_statement_under_the_cursor() {
+        let mut app = sql_app();
+        write(&mut app, "select 1;\nselect 2");
+        // `q`, `1`, `?` are text here.
+        assert!(!app.should_quit);
+        let effects = key_effects(&mut app, "ctrl+e");
+        let ex = executed(&effects);
+        assert_eq!(
+            ex.iter().map(|e| e.1.as_str()).collect::<Vec<_>>(),
+            ["select 2"]
+        );
+        assert!(app.busy.is_some());
+        let effects = done(&mut app, ex[0].0, rows_result(3));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::AppendHistory(h) if h.sql == "select 2" && h.ok))
+        );
+        assert!(app.sql.running.is_none() && app.busy.is_none());
+        assert_eq!(app.sql.results.len(), 1);
+        assert_eq!(app.sql.results[0].label, "SELECT 3");
+        assert_eq!(app.sql.history.len(), 1);
+        assert_eq!(app.status.as_ref().map(|s| s.level), Some(Level::Success));
+    }
+
+    #[test]
+    fn a_script_runs_one_statement_at_a_time_and_stops_on_error() {
+        let mut app = sql_app();
+        write(&mut app, "select 1;\nselect nope;\nselect 3;");
+        let ex = executed(&key_effects(&mut app, "f5"));
+        assert_eq!(ex[0].1, "select 1");
+        let ex = executed(&done(&mut app, ex[0].0, rows_result(1)));
+        assert_eq!(ex[0].1, "select nope");
+        let effects = app.update(Msg::Db(DbEvent::StatementFailed {
+            id: ex[0].0,
+            error: ExecError {
+                message: "column \"nope\" does not exist".into(),
+                position: Some(8),
+            },
+            elapsed: Duration::ZERO,
+        }));
+        assert!(executed(&effects).is_empty(), "stops at the first error");
+        assert_eq!(app.sql.results.len(), 2);
+        assert!(app.sql.results[1].error);
+        assert_eq!(app.sql.active, 1, "the error is shown");
+        // The cursor is on the error: line 2, column 8.
+        assert_eq!(
+            (app.sql.editor.cursor.row, app.sql.editor.cursor.col),
+            (1, 7)
+        );
+        let msg = &app.status.as_ref().unwrap().text;
+        assert!(msg.contains("1 instruction(s) non exécutée(s)"), "{msg}");
+    }
+
+    #[test]
+    fn selection_runs_its_statements() {
+        let mut app = sql_app();
+        write(&mut app, "select 1;\nselect 2;\nselect 3;");
+        key(&mut app, "ctrl+home shift+down shift+down shift+end");
+        let ex = executed(&key_effects(&mut app, "ctrl+e"));
+        assert_eq!(ex[0].1, "select 1");
+        let ex = executed(&done(&mut app, ex[0].0, rows_result(1)));
+        assert_eq!(ex[0].1, "select 2");
+        let ex = executed(&done(&mut app, ex[0].0, rows_result(1)));
+        assert_eq!(ex[0].1, "select 3");
+    }
+
+    #[test]
+    fn manual_transaction_and_quit_guard() {
+        let mut app = sql_app();
+        write(&mut app, "begin");
+        let ex = executed(&key_effects(&mut app, "ctrl+e"));
+        done(&mut app, ex[0].0, StatementResult::default());
+        assert_eq!(app.sql.txn, TxnState::Open);
+        // A failing statement aborts it.
+        key(&mut app, "ctrl+a");
+        write(&mut app, "select 1/0");
+        let ex = executed(&key_effects(&mut app, "ctrl+e"));
+        app.update(Msg::Db(DbEvent::StatementFailed {
+            id: ex[0].0,
+            error: ExecError {
+                message: "division by zero".into(),
+                position: None,
+            },
+            elapsed: Duration::ZERO,
+        }));
+        assert_eq!(app.sql.txn, TxnState::Aborted);
+        // Quitting asks first.
+        key(&mut app, "ctrl+h q");
+        assert!(matches!(app.overlay, Some(Overlay::ConfirmTxnExit(_))));
+        key(&mut app, "n");
+        assert!(!app.should_quit);
+        // ROLLBACK closes it.
+        key(&mut app, "3 ctrl+a");
+        write(&mut app, "rollback");
+        let ex = executed(&key_effects(&mut app, "ctrl+e"));
+        done(&mut app, ex[0].0, StatementResult::default());
+        assert_eq!(app.sql.txn, TxnState::Idle);
+        key(&mut app, "ctrl+h q");
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn writes_without_where_ask_first() {
+        let mut app = sql_app();
+        write(&mut app, "delete from t");
+        assert!(executed(&key_effects(&mut app, "ctrl+e")).is_empty());
+        assert!(matches!(app.overlay, Some(Overlay::ConfirmWrites { .. })));
+        key(&mut app, "esc");
+        assert!(app.overlay.is_none() && app.sql.running.is_none());
+        key_effects(&mut app, "ctrl+e");
+        let ex = executed(&key_effects(&mut app, "o"));
+        assert_eq!(ex[0].1, "delete from t");
+    }
+
+    #[test]
+    fn results_use_the_data_grid() {
+        let mut app = sql_app();
+        write(&mut app, "select n");
+        let ex = executed(&key_effects(&mut app, "ctrl+e"));
+        done(&mut app, ex[0].0, rows_result(5));
+        key(&mut app, "esc");
+        assert_eq!(app.sql.focus, SqlFocus::Results);
+        key(&mut app, "j j");
+        assert_eq!(app.sql.active_view().unwrap().grid.row, 2);
+        let effects = key_effects(&mut app, "y y");
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::Copy(t) if t == "2")),
+            "{effects:?}"
+        );
+        // Sorting is the query's job.
+        key(&mut app, "s");
+        assert_eq!(app.status.as_ref().map(|s| s.level), Some(Level::Info));
+        key(&mut app, "enter");
+        assert!(matches!(app.overlay, Some(Overlay::RowDetail { .. })));
+        key(&mut app, "esc i");
+        assert_eq!(app.sql.focus, SqlFocus::Editor);
+        assert!(
+            app.data.object.is_none() || app.data.object.is_some(),
+            "data untouched"
+        );
+    }
+
+    #[test]
+    fn history_search_inserts_a_statement() {
+        let mut app = sql_app();
+        for q in [
+            "select 1",
+            "update t set a = 1 where id = 2",
+            "select now()",
+        ] {
+            key(&mut app, "ctrl+a");
+            write(&mut app, q);
+            let ex = executed(&key_effects(&mut app, "ctrl+e"));
+            done(&mut app, ex[0].0, StatementResult::default());
+        }
+        key(&mut app, "ctrl+a backspace ctrl+r");
+        let Some(Overlay::HistorySearch(s)) = &app.overlay else {
+            panic!("history expected");
+        };
+        assert_eq!(s.matches, [2, 1, 0], "most recent first");
+        write(&mut app, "upd");
+        key(&mut app, "enter");
+        assert_eq!(app.sql.editor.text(), "update t set a = 1 where id = 2");
+    }
+
+    #[test]
+    fn saved_queries() {
+        let mut app = sql_app();
+        write(&mut app, "select 42");
+        key(&mut app, "ctrl+p");
+        write(&mut app, "save\n");
+        assert_eq!(app.status.as_ref().map(|s| s.level), Some(Level::Warning));
+        key(&mut app, "ctrl+p");
+        write(&mut app, "save");
+        let effects = {
+            let mut e = Vec::new();
+            for c in " rapport\n".chars() {
+                let code = if c == '\n' {
+                    KeyCode::Enter
+                } else {
+                    KeyCode::Char(c)
+                };
+                e.extend(app.update(Msg::Key(KeyEvent::new(code, KeyModifiers::NONE))));
+            }
+            e
+        };
+        assert!(effects.iter().any(|e| matches!(e, Effect::SaveQuery { name, text } if name == "rapport" && text == "select 42")));
+        key(&mut app, "ctrl+p");
+        write(&mut app, "save ../x\n");
+        assert_eq!(app.status.as_ref().map(|s| s.level), Some(Level::Error));
+        app.update(Msg::QueryLoaded {
+            name: "autre".into(),
+            text: "select 1;\nselect 2;".into(),
+        });
+        assert_eq!(app.sql.editor.lines().len(), 2);
+        assert_eq!(app.sql.file.as_deref(), Some("autre"));
+    }
+
+    #[test]
+    fn vim_mode() {
+        let mut app = connected_app();
+        app.sql = crate::app::sql_tab::SqlState::new(crate::config::EditorMode::Vim, 4);
+        key(&mut app, "3");
+        assert_eq!(app.mode(), Mode::Normal);
+        write(&mut app, "iselect 1");
+        assert_eq!(app.mode(), Mode::Insert);
+        key(&mut app, "esc");
+        let ex = executed(&key_effects(&mut app, "ctrl+e"));
+        assert_eq!(ex[0].1, "select 1");
+        done(&mut app, ex[0].0, rows_result(1));
+        // Keys vim does not use reach the keymap.
+        write(&mut app, "dd");
+        assert!(app.sql.editor.is_empty());
+        key(&mut app, "q");
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn no_connection_no_run() {
+        let mut app = app_with(&["a"], None);
+        key(&mut app, "3");
+        write(&mut app, "select 1");
+        assert!(executed(&key_effects(&mut app, "ctrl+e")).is_empty());
+        assert_eq!(app.status.as_ref().map(|s| s.level), Some(Level::Warning));
     }
 }

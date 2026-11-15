@@ -211,6 +211,44 @@ impl DataView {
         v
     }
 
+    /// A fully loaded, read-only result of the SQL tab.
+    pub fn from_result(
+        columns: &[crate::db::exec::ResultColumn],
+        rows: Vec<Vec<Option<String>>>,
+    ) -> Self {
+        let n = rows.len();
+        let mut v = DataView {
+            columns: columns
+                .iter()
+                .map(|c| DataColumn {
+                    name: c.name.clone(),
+                    data_type: c.data_type.clone(),
+                    kind: ValueKind::of_engine(&c.data_type),
+                    key: false,
+                    has_default: false,
+                })
+                .collect(),
+            read_only_reason: Some("résultat de requête : lecture seule".into()),
+            rows,
+            total: Total::Exact(n as u64),
+            exhausted: true,
+            count_requested: true,
+            page_size: n.max(10),
+            ..Default::default()
+        };
+        v.staging = Staging::new(Vec::new(), v.columns.len());
+        v.base_order = (0..v.columns.len()).collect();
+        v.auto_width = v
+            .columns
+            .iter()
+            .map(|c| display_width(&c.name).max(4))
+            .collect();
+        v.measure_widths();
+        // Later pages are measured on the first rows only.
+        v.page_size = 200;
+        v
+    }
+
     pub fn is_for(&self, obj: &ObjectRef) -> bool {
         self.object.as_ref() == Some(obj)
     }
@@ -675,7 +713,10 @@ impl DataView {
     /// Loaded part of a selection, for copying. Also returns how many
     /// selected rows were not loaded.
     pub fn extract(&self, rows: Range<usize>, dcols: &[usize]) -> (Extract<'_>, usize) {
-        let obj = self.object.as_ref().expect("data view without object");
+        let (schema, table) = self
+            .object
+            .as_ref()
+            .map_or(("", "resultat"), |o| (o.schema.as_str(), o.name.as_str()));
         let columns = dcols
             .iter()
             .map(|d| {
@@ -698,8 +739,8 @@ impl DataView {
         }
         (
             Extract {
-                schema: &obj.schema,
-                table: &obj.name,
+                schema,
+                table,
                 columns,
                 rows: out,
             },

@@ -10,8 +10,10 @@ mod help;
 mod picker;
 mod popup;
 mod schema_view;
+mod sql_tab;
 mod sql_view;
 mod status_bar;
+pub use status_bar::fmt_duration as fmt_elapsed;
 pub mod table_view;
 pub mod theme;
 mod tree;
@@ -67,6 +69,16 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Some(Overlay::Command(input)) => popup::draw_command_line(frame, app, input, hints_area),
         _ => status_bar::draw_hints(frame, app, hints_area),
     }
+    let swapped = app.tab == crate::app::Tab::Sql
+        && app.overlay.as_ref().is_some_and(Overlay::is_data)
+        && app.swap_results();
+    draw_overlay(frame, app, body);
+    if swapped {
+        app.swap_results();
+    }
+}
+
+fn draw_overlay(frame: &mut Frame, app: &mut App, body: Rect) {
     match &app.overlay {
         Some(Overlay::Help { scroll }) => help::draw(frame, app, *scroll, body),
         Some(Overlay::Password { conn, input, error }) => {
@@ -107,6 +119,16 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             body,
         ),
         Some(Overlay::ConfirmDiscard) => edit_popups::draw_confirm_discard(frame, app, body),
+        Some(Overlay::ConfirmWrites { risky, target, .. }) => {
+            sql_tab::draw_confirm_writes(frame, app, risky, target, body)
+        }
+        Some(Overlay::ConfirmTxnExit(after)) => {
+            sql_tab::draw_confirm_txn_exit(frame, app, after, body)
+        }
+        Some(Overlay::HistorySearch(s)) => sql_tab::draw_history(frame, app, s, body),
+        Some(Overlay::QueryList { names, cursor }) => {
+            sql_tab::draw_query_list(frame, app, names, *cursor, body)
+        }
         Some(Overlay::PendingChanges(after)) => {
             edit_popups::draw_pending_changes(frame, app, after, body)
         }

@@ -55,12 +55,22 @@ start() { # args, width, height
   for _ in 1 2 3 4 5; do
     sleep 0.5
     tmux -f "$WORK/tmux.conf" new-session -d -s pg -x "$2" -y "$3" \
-      "env XDG_CONFIG_HOME=${CONFIG:-$WORK/config} XDG_STATE_HOME=$WORK/state COLORTERM=truecolor $BIN $1; sleep 120" && break
+      "env XDG_CONFIG_HOME=${CONFIG:-$WORK/config} XDG_STATE_HOME=$WORK/state XDG_DATA_HOME=$WORK/data COLORTERM=truecolor $BIN $1; sleep 120" && break
   done
   sleep 1.5
 }
 keys() { for k in "$@"; do tmux send-keys -t pg -- "$k"; sleep 0.15; done; sleep 0.6; }
-text() { tmux send-keys -t pg -l -- "$1"; sleep 0.4; }
+# Literal text; `;` is sent apart (tmux reads a trailing `;` as a separator).
+text() {
+  local rest="$1" part
+  while [[ "$rest" == *";"* ]]; do
+    part="${rest%%;*}"; rest="${rest#*;}"
+    [ -n "$part" ] && tmux send-keys -t pg -l -- "$part"
+    tmux send-keys -t pg '\;'
+  done
+  [ -n "$rest" ] && tmux send-keys -t pg -l -- "$rest"
+  sleep 0.4
+}
 shot() { # name, title, [palette]
   tmux capture-pane -e -N -p -t pg > "$WORK/$1.ans"
   python3 -I "$HERE/ansi2html.py" "$WORK/$1.ans" "$WORK/$1.html" "$2" "${3:-tokyonight}"
@@ -99,6 +109,22 @@ keys C-h 1; sleep 0.8; keys C-l; sleep 0.3
 start "--connection demo" 130 26
 keys / o r d e r s Enter Enter 2; sleep 1; keys l l l s s; sleep 1; keys / p a i d Enter; sleep 0.5
 palettes 18-theme "pgtui — thème terminal"
+
+# SQL tab scenes (milestone 5).
+start "--connection demo" 140 30
+keys 3
+text "select c.country, count(*) as clients, round(avg(o.total), 2) as panier_moyen"; keys Enter
+text "from shop.customers c join shop.orders o on o.customer_id = c.id"; keys Enter
+text "group by c.country order by clients desc;"; keys Enter Enter
+text "select id, emial from shop.customers;"
+keys Up Up C-e; sleep 1.5; shot 30-sql-resultat "pgtui — onglet SQL : résultat"
+keys Down Down C-e; sleep 1; shot 31-sql-erreur "pgtui — onglet SQL : erreur et position"
+keys C-r; text "count"; shot 32-sql-historique "pgtui — onglet SQL : historique (Ctrl+r)"; keys Escape
+keys C-a; text "begin;"; keys Enter; text "update shop.products set price = price * 1.1;"; keys Enter
+text "select name, price from shop.products order by price desc limit 5;"
+keys F5; sleep 0.5; shot 33-sql-garde "pgtui — onglet SQL : UPDATE sans WHERE"
+keys o; sleep 1.5; shot 34-sql-transaction "pgtui — onglet SQL : transaction manuelle"
+keys C-a; text "rollback"; keys C-e; sleep 0.5
 
 # Editing scenes (milestone 4): a scratch table, recreated on each run.
 export PGPASSWORD=pgtui

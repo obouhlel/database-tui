@@ -46,6 +46,10 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         data_view::draw(frame, app, &obj, inner);
         return;
     }
+    if app.tab == Tab::Sql {
+        super::sql_tab::draw(frame, app, inner);
+        return;
+    }
 
     let label = Style::new().fg(t.dim);
     let value = Style::new().fg(t.fg);
@@ -85,8 +89,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
             let pending = match app.tab {
                 Tab::Schema => "",
                 Tab::Data if !obj.kind.has_rows() => "Cet objet n'a pas de lignes à afficher.",
-                Tab::Data => "L'onglet Data (tableau paginé, tri, filtres…) arrive au jalon 3.",
-                Tab::Sql => "L'onglet SQL (éditeur, exécution, historique…) arrive au jalon 5.",
+                Tab::Data | Tab::Sql => "",
             };
             lines.push(Line::styled(pending, label));
         }

@@ -43,6 +43,27 @@ impl ValueKind {
         }
     }
 
+    /// From an engine type name (`int4`, `_text`, `timestamptz`, ...), as
+    /// reported for query results.
+    pub fn of_engine(name: &str) -> Self {
+        if name.starts_with('_') {
+            return ValueKind::Array;
+        }
+        match name {
+            "bool" => ValueKind::Bool,
+            "int2" | "int4" | "int8" | "oid" => ValueKind::Integer,
+            "float4" | "float8" => ValueKind::Float,
+            "numeric" | "money" => ValueKind::Numeric,
+            "json" | "jsonb" => ValueKind::Json,
+            "bytea" => ValueKind::Bytea,
+            "text" | "varchar" | "bpchar" | "name" | "citext" | "uuid" => ValueKind::Text,
+            "date" | "time" | "timetz" | "timestamp" | "timestamptz" | "interval" => {
+                ValueKind::Temporal
+            }
+            _ => ValueKind::Other,
+        }
+    }
+
     pub fn is_numeric(self) -> bool {
         matches!(
             self,

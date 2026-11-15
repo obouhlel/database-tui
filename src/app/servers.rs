@@ -195,6 +195,7 @@ impl App {
             self.data = DataView::default();
         }
         self.back_stack.retain(|o| o.connection != name);
+        self.sql_connection_closed(name);
         if self.login.as_ref().is_some_and(|l| l.connection == name) {
             self.login = None;
         }
@@ -403,6 +404,7 @@ impl App {
                 connection,
                 message,
             } => {
+                self.sql_connection_closed(&connection);
                 if let Some(s) = self.server_mut(&connection) {
                     s.state = ConnState::Lost(message.clone());
                 }
