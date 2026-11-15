@@ -45,6 +45,25 @@ pgtui --url postgres://pgtui:pgtui@localhost:5433/demo
 
 La base de démo (`docker/initdb/`) contient trois schémas (`shop`, `hr`, `audit`), ~350 000 lignes et tous les types que pgtui doit gérer : enum, uuid, jsonb, tableaux, inet, bytea, interval, timestamptz, table partitionnée, vue, vue matérialisée, séquence, fonction, procédure, trigger, table sans clé primaire, table de 42 colonnes, données Unicode (accents, CJK, emoji).
 
+## Détection des serveurs locaux
+
+Au démarrage, pgtui cherche les serveurs PostgreSQL de la machine : port 5432 sur `127.0.0.1` et `::1`, et sockets Unix dans `/var/run/postgresql`, `/run/postgresql` et `/tmp`. Chaque candidat reçoit le paquet d'ouverture `SSLRequest` : un serveur PostgreSQL répond `S` ou `N`, ce qui l'identifie sans s'authentifier. Rien n'est scanné sur le réseau.
+
+Les serveurs trouvés apparaissent dans le sélecteur, sous les connexions configurées. `Entrée` ouvre un formulaire **utilisateur / mot de passe / base** (base `postgres` par défaut). En cas d'erreur, le formulaire revient avec le message du serveur. Une fois connecté, pgtui propose d'ajouter le serveur à `config.toml`, **sans le mot de passe**. `R` relance la détection.
+
+```toml
+[general]
+discover = true            # false pour désactiver
+discover_ports = [5432]    # ex. [5432, 5433]
+```
+
+| ![Serveurs détectés](docs/screenshots/14-detection.png) | ![Toutes les bases](docs/screenshots/16-bases.png) |
+|---|---|
+
+## Toutes les bases du serveur
+
+L'arbre affiche à sa racine **toutes les bases** du serveur, avec leur taille (`pg_database`, hors modèles). La base de connexion est dépliée ; déplier une autre base ouvre une connexion vers elle, avec les mêmes identifiants, et charge ses schémas. Une base sans le droit `CONNECT` est marquée « accès refusé ». La barre de statut et l'en-tête des onglets indiquent la base de l'objet ouvert.
+
 ## Lancement
 
 ```
@@ -146,7 +165,8 @@ Couleurs : noms (`red`, `light-blue`, `orange`…), `#rrggbb` ou index ANSI (`20
 | | `/` | Filtre flou (`schema.table` pour qualifier) |
 | | `Esc` | Effacer le filtre |
 | | `R` | Recharger le catalogue |
-| Sélecteur | `Enter` | Se connecter |
+| Sélecteur | `Enter` | Se connecter (formulaire utilisateur / mot de passe pour un serveur détecté) |
+| | `R` | Relancer la détection des serveurs locaux |
 | Onglet Schema | `[` / `]` | Section précédente / suivante (Colonnes, Index, Contraintes, Triggers, Relations, DDL, Infos) |
 | | `j`/`k`, `gg`/`G`, `Ctrl+d`/`Ctrl+u` | Naviguer dans la section |
 | | `h`/`l` · `←`/`→`, `0` / `$` | Défiler horizontalement (colonnes, ou texte du DDL) |
@@ -188,7 +208,8 @@ src/
 │   ├── catalog.rs   modèle neutre des objets (schémas, tables, vues…)
 │   ├── schema.rs    détails neutres d'un objet (colonnes, index, contraintes, FK, stats)
 │   ├── postgres/    tokio-postgres + rustls : connexions, TLS, catalogue, détails, DDL
-│   └── worker.rs    tâche qui possède les connexions ; DbCommand → DbEvent
+│   ├── discover.rs  détection des serveurs locaux (SSLRequest)
+│   └── worker.rs    tâche qui possède les connexions (une par base, ouvertes à la demande) ; DbCommand → DbEvent
 ├── app/             état + reducer (aucune I/O) : App::update(Msg) -> Vec<Effect>
 ├── keymap/          touches → actions par contexte, séquences, surcharges
 └── ui/              rendu : table_view (réutilisable), schema_view, sql_view, tree, status_bar, help…

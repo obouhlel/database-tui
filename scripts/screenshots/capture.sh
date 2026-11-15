@@ -51,7 +51,7 @@ start() { # args, width, height
   done
   sleep 1.5
 }
-keys() { for k in "$@"; do tmux send-keys -t pg "$k"; sleep 0.15; done; sleep 0.6; }
+keys() { for k in "$@"; do tmux send-keys -t pg -- "$k"; sleep 0.15; done; sleep 0.6; }
 shot() {
   tmux capture-pane -e -N -p -t pg > "$WORK/$1.ans"
   python3 -I "$HERE/ansi2html.py" "$WORK/$1.ans" "$WORK/$1.html" "$2"
@@ -75,6 +75,16 @@ keys Escape f; keys BTab I; keys Tab; keys '%' z o '%'; sleep 0.3; shot 11-data-
 keys Escape; keys g g j Enter; keys j j j j j j j j j j j j j j; sleep 0.3; shot 12-data-detail "pgtui — Data : détail d'une ligne"
 keys Escape; keys C-h / o r d e r s Enter Enter; sleep 1
 keys '$' h s s; sleep 1; keys V j j j; shot 13-data-tri "pgtui — Data : tri décroissant et sélection"
+
+# Discovery scenes: need a server on 127.0.0.1:5432 whose `postgres` user has
+# the password $PGTUI_SHOT_PASSWORD (default: secret).
+if (exec 3<>/dev/tcp/127.0.0.1/5432) 2>/dev/null; then
+  PW="${PGTUI_SHOT_PASSWORD:-secret}"
+  start "" 120 24
+  keys G; shot 14-detection "pgtui — serveurs détectés"
+  keys Enter; keys "$PW"; shot 15-connexion "pgtui — connexion à un serveur détecté"
+  keys Enter; sleep 1.5; keys n; keys G l; sleep 1; shot 16-bases "pgtui — toutes les bases du serveur"
+fi
 
 mkdir -p "$ROOT/docs/screenshots"
 node "$HERE/render.js" "$ROOT/docs/screenshots" "$WORK"/[0-9]*.html
