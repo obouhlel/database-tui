@@ -4,7 +4,7 @@
 
 use async_trait::async_trait;
 
-use super::catalog::{Catalog, ObjectRef};
+use super::catalog::{Catalog, DatabaseInfo, ObjectRef};
 use super::data::{DataRequest, RowCount, TextRows};
 use super::schema::ObjectDetails;
 
@@ -40,6 +40,9 @@ pub trait Backend: Send + Sync {
     /// Loads schemas and their objects. System schemas are included only if
     /// `include_system` is set.
     async fn load_catalog(&self, include_system: bool) -> anyhow::Result<Catalog>;
+
+    /// All databases of the server (templates excluded).
+    async fn list_databases(&self) -> anyhow::Result<Vec<DatabaseInfo>>;
 
     /// Columns, indexes, constraints, DDL, ... of one object.
     async fn object_details(&self, object: &ObjectRef) -> anyhow::Result<ObjectDetails>;

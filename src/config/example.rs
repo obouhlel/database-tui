@@ -12,6 +12,8 @@ statement_timeout_secs = 0    # timeout des requêtes en secondes, 0 = aucun
 show_system_schemas = false   # afficher pg_catalog / information_schema dans l'arbre
 log_level = "info"            # logs dans ~/.local/state/pgtui/pgtui.log (ou $PGTUI_LOG)
 clipboard = "auto"            # "auto" | "system" | "osc52" (OSC 52 : copie via le terminal, utile en SSH)
+discover = true               # chercher des serveurs PostgreSQL sur cette machine au démarrage
+discover_ports = [5432]       # ports sondés (ex. [5432, 5433])
 
 [editor]
 mode = "classic"              # "classic" (toujours en insertion) | "vim" (modal)

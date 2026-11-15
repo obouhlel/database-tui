@@ -215,6 +215,7 @@ async fn worker_connect_and_catalog() {
 
     commands
         .send(DbCommand::LoadCatalog {
+            database: "demo".into(),
             include_system: false,
         })
         .unwrap();
@@ -230,6 +231,7 @@ async fn worker_connect_and_catalog() {
     commands.send(DbCommand::Disconnect).unwrap();
     commands
         .send(DbCommand::LoadCatalog {
+            database: "demo".into(),
             include_system: false,
         })
         .unwrap();
@@ -237,7 +239,7 @@ async fn worker_connect_and_catalog() {
         .await
         .unwrap()
         .unwrap();
-    assert!(matches!(ev, DbEvent::CatalogFailed(_)), "{ev:?}");
+    assert!(matches!(ev, DbEvent::CatalogFailed { .. }), "{ev:?}");
 }
 
 #[tokio::test]
@@ -271,6 +273,7 @@ use pgtui::db::schema::{ConstraintKind, FkAction, Identity, ObjectDetails};
 
 fn obj(schema: &str, name: &str, kind: ObjectKind) -> ObjectRef {
     ObjectRef {
+        database: "demo".into(),
         schema: schema.into(),
         name: name.into(),
         kind,
@@ -850,4 +853,106 @@ async fn long_query_can_be_cancelled() {
     let err = fetch.await.unwrap().unwrap_err().to_string();
     assert!(err.contains("canceling statement"), "{err}");
     assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+// ------------------------------------------- discovery and several databases
+
+#[tokio::test]
+async fn discovers_the_demo_server() {
+    let Some(_) = test_url() else { return };
+    let found = pgtui::db::discover::scan(&[5433]).await;
+    assert!(
+        found
+            .iter()
+            .any(|s| s.host == "127.0.0.1" && s.port == 5433),
+        "{found:?}"
+    );
+}
+
+#[tokio::test]
+async fn lists_databases() {
+    let Some(url) = test_url() else { return };
+    let b = db::connect(&request(&url), no_lost()).await.unwrap();
+    let dbs = b.list_databases().await.unwrap();
+    let names: Vec<_> = dbs.iter().map(|d| d.name.as_str()).collect();
+    assert!(
+        names.contains(&"demo") && names.contains(&"postgres"),
+        "{names:?}"
+    );
+    assert!(!names.iter().any(|n| n.starts_with("template")));
+    let demo = dbs.iter().find(|d| d.name == "demo").unwrap();
+    assert!(demo.can_connect && demo.size_bytes.unwrap() > 1_000_000);
+}
+
+/// Connected to `demo`, the worker opens `postgres` on demand with the same
+/// credentials, and routes object requests to the right database.
+#[tokio::test]
+async fn worker_opens_other_databases_lazily() {
+    let Some(url) = test_url() else { return };
+    let (tx, mut rx) = unbounded_channel();
+    let commands = worker::spawn(tx);
+    commands
+        .send(DbCommand::Connect {
+            request: Box::new(request(&url)),
+            resolve_password: false,
+        })
+        .unwrap();
+    match next_event(&mut rx).await {
+        DbEvent::Connected {
+            info, databases, ..
+        } => {
+            assert_eq!(info.database, "demo");
+            assert!(databases.iter().any(|d| d.name == "postgres"));
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+    commands
+        .send(DbCommand::LoadCatalog {
+            database: "postgres".into(),
+            include_system: false,
+        })
+        .unwrap();
+    match next_event(&mut rx).await {
+        DbEvent::CatalogLoaded { catalog, .. } => {
+            assert_eq!(catalog.database, "postgres");
+            assert!(
+                !catalog.schemas.iter().any(|s| s.name == "shop"),
+                "shop lives in demo only"
+            );
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+    // An object of `demo` still goes to `demo`.
+    commands
+        .send(DbCommand::LoadDetails(obj(
+            "shop",
+            "orders",
+            ObjectKind::Table,
+        )))
+        .unwrap();
+    match next_event(&mut rx).await {
+        DbEvent::DetailsLoaded { details, .. } => assert_eq!(details.object.database, "demo"),
+        other => panic!("unexpected {other:?}"),
+    }
+    // An unknown database is a clean error.
+    commands
+        .send(DbCommand::LoadCatalog {
+            database: "nope".into(),
+            include_system: false,
+        })
+        .unwrap();
+    match next_event(&mut rx).await {
+        DbEvent::CatalogFailed { database, error } => {
+            assert_eq!(database, "nope");
+            assert!(error.contains("does not exist"), "{error}");
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+async fn next_event(rx: &mut tokio::sync::mpsc::UnboundedReceiver<DbEvent>) -> DbEvent {
+    tokio::time::timeout(Duration::from_secs(10), rx.recv())
+        .await
+        .unwrap()
+        .unwrap()
 }

@@ -92,3 +92,115 @@ pub fn draw_error(frame: &mut Frame, app: &App, title: &str, message: &str, area
         rect,
     );
 }
+
+pub fn draw_login(
+    frame: &mut Frame,
+    app: &App,
+    form: &crate::app::discovery::LoginForm,
+    area: Rect,
+) {
+    use crate::app::discovery::LOGIN_FIELDS;
+    let t = &app.theme;
+    let rect = centered(area, 70, 11);
+    let block = Block::bordered()
+        .title(Span::styled(
+            format!(" Connexion — {} ", form.server.label()),
+            Style::new().fg(t.accent).add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Line::styled(
+            " Tab champ suivant · Entrée se connecter · Esc annuler ",
+            t.dim(),
+        ))
+        .border_style(t.border(true))
+        .style(t.base());
+    let inner = block.inner(rect);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(block, rect);
+
+    let mut lines = vec![
+        Line::styled(
+            "Toutes les bases accessibles seront listées dans l'arbre.",
+            t.dim(),
+        ),
+        Line::default(),
+    ];
+    let label_w = LOGIN_FIELDS
+        .iter()
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap_or(0)
+        + 2;
+    for (i, label) in LOGIN_FIELDS.iter().enumerate() {
+        let active = i == form.field;
+        let text = if i == 1 {
+            "*".repeat(form.fields[i].text().chars().count())
+        } else {
+            form.fields[i].text().to_string()
+        };
+        let value_style = if active {
+            Style::new().fg(t.fg).bg(t.selection_inactive_bg)
+        } else {
+            Style::new().fg(t.fg)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{label:<label_w$}"),
+                if active {
+                    Style::new().fg(t.accent).add_modifier(Modifier::BOLD)
+                } else {
+                    t.dim()
+                },
+            ),
+            Span::styled(format!("{text:<40}"), value_style),
+        ]));
+    }
+    if let Some(e) = &form.error {
+        lines.push(Line::default());
+        lines.push(Line::styled(e.clone(), Style::new().fg(t.error)));
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    let field = &form.fields[form.field];
+    let x = inner.x + label_w as u16 + field.cursor_width() as u16;
+    frame.set_cursor_position((
+        x.min(inner.right().saturating_sub(1)),
+        inner.y + 2 + form.field as u16,
+    ));
+}
+
+pub fn draw_save_server(frame: &mut Frame, app: &App, conn: &ConnectionConfig, area: Rect) {
+    let t = &app.theme;
+    let rect = centered(area, 70, 7);
+    let block = Block::bordered()
+        .title(Span::styled(
+            " Enregistrer ce serveur ? ",
+            Style::new().fg(t.accent).add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Line::styled(" o / Entrée : oui · n / Esc : non ", t.dim()))
+        .border_style(t.border(true))
+        .style(t.base());
+    frame.render_widget(Clear, rect);
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("Ajouter « ", Style::new().fg(t.fg)),
+            Span::styled(
+                conn.name.clone(),
+                Style::new().fg(t.accent).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" » ({}) à config.toml ?", conn.target()),
+                Style::new().fg(t.fg),
+            ),
+        ]),
+        Line::default(),
+        Line::styled(
+            "Le mot de passe n'est pas enregistré : il sera redemandé, ou lu depuis ~/.pgpass.",
+            t.dim(),
+        ),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false }),
+        rect,
+    );
+}

@@ -93,7 +93,8 @@ fn real_main(cli: Cli) -> Result<()> {
     }
 
     let mouse = config.general.mouse;
-    let app = App::new(config, keymap, theme, warnings, extra, start);
+    let mut app = App::new(config, keymap, theme, warnings, extra, start);
+    app.config_path = Some(config_path.clone());
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

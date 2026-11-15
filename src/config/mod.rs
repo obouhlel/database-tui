@@ -78,6 +78,10 @@ pub struct General {
     pub log_level: String,
     /// `auto`, `system` or `osc52`.
     pub clipboard: ClipboardMode,
+    /// Look for PostgreSQL servers on this machine at startup.
+    pub discover: bool,
+    /// Ports probed by the discovery.
+    pub discover_ports: Vec<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -102,6 +106,8 @@ impl Default for General {
             show_system_schemas: false,
             log_level: "info".into(),
             clipboard: ClipboardMode::Auto,
+            discover: true,
+            discover_ports: vec![5432],
         }
     }
 }
@@ -455,6 +461,36 @@ impl Config {
     }
 }
 
+/// Appends a `[[connections]]` block to the configuration file, leaving
+/// the rest (comments included) untouched. No password is ever written.
+pub fn append_connection(path: &Path, conn: &ConnectionConfig) -> Result<(), ConfigError> {
+    let q = |s: &str| toml::Value::String(s.to_string()).to_string();
+    let mut block = format!(
+        "\n# Ajouté par pgtui (serveur détecté)\n[[connections]]\nname = {}\nhost = {}\nport = {}\n",
+        q(&conn.name),
+        q(&conn.host),
+        conn.port
+    );
+    if let Some(u) = &conn.user {
+        block.push_str(&format!("user = {}\n", q(u)));
+    }
+    if let Some(d) = &conn.database {
+        block.push_str(&format!("database = {}\n", q(d)));
+    }
+    block.push_str(&format!("sslmode = {}\n", q(conn.sslmode.as_str())));
+    let mut content = std::fs::read_to_string(path).unwrap_or_default();
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str(&block);
+    // Refuse to write a file that would no longer parse.
+    Config::parse(&content, path)?;
+    std::fs::write(path, content).map_err(|source| ConfigError::Write {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -594,6 +630,31 @@ mod tests {
         assert_eq!(parse_color("#ff8800"), Ok(Color::Rgb(0xff, 0x88, 0x00)));
         assert_eq!(parse_color("orange"), Ok(Color::Indexed(208)));
         assert!(parse_color("nope").is_err());
+    }
+
+    #[test]
+    fn append_connection_keeps_comments_and_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "# mon commentaire\n[general]\npage_size = 50").unwrap();
+        let mut c = ConnectionConfig::named("localhost");
+        c.host = "/var/run/postgresql".into();
+        c.user = Some("o\"brien".into());
+        c.database = Some("postgres".into());
+        c.password = Some("never written".into());
+        append_connection(&path, &c).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("# mon commentaire\n"));
+        assert!(!text.contains("never written"));
+        let (config, warnings) = Config::parse(&text, &path).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let saved = config.connection("localhost").unwrap();
+        assert_eq!(saved.user.as_deref(), Some("o\"brien"));
+        assert_eq!(saved.host, "/var/run/postgresql");
+        assert_eq!(config.general.page_size, 50);
+        // A duplicate name is refused (the file would not load any more).
+        assert!(append_connection(&path, &c).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
     }
 
     #[test]

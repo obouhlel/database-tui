@@ -1,6 +1,6 @@
 use super::*;
 use crate::db::BackendKind;
-use crate::db::catalog::{DbObject, ObjectKind, Schema};
+use crate::db::catalog::{Catalog, DbObject, ObjectKind, Schema};
 use crossterm::event::KeyModifiers;
 use pretty_assertions::assert_eq;
 
@@ -30,7 +30,7 @@ fn db(effects: Vec<Effect>) -> Vec<DbCommand> {
         .into_iter()
         .filter_map(|e| match e {
             Effect::Db(c) => Some(c),
-            Effect::Copy(_) => None,
+            _ => None,
         })
         .collect()
 }
@@ -62,7 +62,7 @@ fn info() -> ServerInfo {
         version: "17.0".into(),
         version_num: 170000,
         user: "u".into(),
-        database: "d".into(),
+        database: "demo".into(),
         tls: false,
     }
 }
@@ -75,6 +75,7 @@ fn catalog() -> Catalog {
         signature: None,
     };
     Catalog {
+        database: "demo".into(),
         schemas: vec![Schema {
             name: "public".into(),
             comment: None,
@@ -90,12 +91,14 @@ fn connected_app() -> App {
     key(&mut app, "enter");
     let cmds = db(app.update(Msg::Db(DbEvent::Connected {
         info: info(),
+        databases: vec![],
         elapsed: Duration::from_millis(5),
     })));
     assert!(matches!(
         cmds.as_slice(),
         [DbCommand::LoadCatalog {
-            include_system: false
+            include_system: false,
+            ..
         }]
     ));
     app.update(Msg::Db(DbEvent::CatalogLoaded {
@@ -139,7 +142,7 @@ fn connect_then_catalog() {
     let app = connected_app();
     assert_eq!(app.screen, Screen::Main);
     assert!(app.connecting.is_none());
-    assert_eq!(app.tree.rows.len(), 4); // public, Tables, customers, orders
+    assert_eq!(app.tree.rows.len(), 5); // demo, public, Tables, customers, orders
 }
 
 #[test]
@@ -201,14 +204,14 @@ fn tree_filter() {
     key(&mut app, "/");
     assert_eq!(app.mode(), Mode::Filter);
     typed(&mut app, "cus");
-    assert_eq!(app.tree.rows.len(), 3);
+    assert_eq!(app.tree.rows.len(), 4); // demo, public, Tables, customers
     assert_eq!(app.tree.selected().unwrap().label, "customers");
     // `q` is text while filtering, not quit.
     typed(&mut app, "q");
     assert!(!app.should_quit);
     key(&mut app, "esc");
     assert_eq!(app.mode(), Mode::Normal);
-    assert_eq!(app.tree.rows.len(), 4);
+    assert_eq!(app.tree.rows.len(), 5);
 }
 
 #[test]
@@ -268,10 +271,11 @@ fn reconnect_keeps_tree_state() {
     assert!(matches!(cmds.as_slice(), [DbCommand::Connect { .. }]));
     app.update(Msg::Db(DbEvent::Connected {
         info: info(),
+        databases: vec![],
         elapsed: Duration::ZERO,
     }));
     assert!(
-        app.session.as_ref().unwrap().catalog.is_some(),
+        app.catalog("demo").is_some(),
         "catalog kept while reloading"
     );
     assert_eq!(app.tree.selected().unwrap().label, "orders");
@@ -418,7 +422,7 @@ mod data_tab {
         assert!(
             effects
                 .iter()
-                .any(|e| matches!(e, Effect::Db(DbCommand::Cancel)))
+                .any(|e| matches!(e, Effect::Db(DbCommand::Cancel { .. })))
         );
         assert!(app.data.error.is_some());
     }
@@ -519,5 +523,136 @@ mod data_tab {
             elapsed: Duration::ZERO,
         }));
         assert_eq!(app.data.rows.len(), 200);
+    }
+}
+
+// ------------------------------------------- discovery and several databases
+
+mod discovery {
+    use super::*;
+    use crate::db::catalog::DatabaseInfo;
+    use crate::db::discover::DiscoveredServer;
+    use pretty_assertions::assert_eq;
+
+    fn dbinfo(name: &str) -> DatabaseInfo {
+        DatabaseInfo {
+            name: name.into(),
+            comment: None,
+            size_bytes: Some(8192 * 1024),
+            can_connect: true,
+        }
+    }
+
+    fn picker_with_server() -> App {
+        let mut app = app_with(&["local"], None);
+        app.config_path = Some("/tmp/does-not-matter.toml".into());
+        let effects = db(app.init());
+        assert!(matches!(effects.as_slice(), [DbCommand::Discover { ports }] if ports == &[5432]));
+        assert!(app.discovering);
+        app.update(Msg::Db(DbEvent::Discovered(vec![DiscoveredServer {
+            host: "127.0.0.1".into(),
+            port: 5432,
+            tls: false,
+        }])));
+        assert_eq!(app.picker_len(), 2);
+        app
+    }
+
+    #[test]
+    fn login_on_a_discovered_server_then_save_it() {
+        let mut app = picker_with_server();
+        key(&mut app, "j enter");
+        assert!(matches!(app.overlay, Some(Overlay::Login(_))));
+        typed(&mut app, "secret");
+        let cmds = key(&mut app, "enter");
+        let request = match cmds.as_slice() {
+            [
+                DbCommand::Connect {
+                    request,
+                    resolve_password: false,
+                },
+            ] => request.clone(),
+            other => panic!("unexpected {other:?}"),
+        };
+        assert_eq!(request.conn.host, "127.0.0.1");
+        assert_eq!(request.conn.database.as_deref(), Some("postgres"));
+        assert_eq!(request.password.as_deref(), Some("secret"));
+        assert_eq!(request.conn.name, "localhost");
+
+        // Wrong password: the form comes back with the error, password cleared.
+        app.update(Msg::Db(DbEvent::ConnectFailed {
+            error: "password authentication failed".into(),
+            password_required: true,
+        }));
+        match &app.overlay {
+            Some(Overlay::Login(f)) => {
+                assert_eq!(f.error.as_deref(), Some("password authentication failed"));
+                assert!(f.password().is_empty());
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        typed(&mut app, "right");
+        key(&mut app, "enter");
+        let mut i = info();
+        i.database = "postgres".into();
+        app.update(Msg::Db(DbEvent::Connected {
+            info: i,
+            databases: vec![dbinfo("demo"), dbinfo("postgres"), dbinfo("shop")],
+            elapsed: Duration::ZERO,
+        }));
+        assert!(matches!(app.overlay, Some(Overlay::SaveServer(_))));
+        let effects = key_effects(&mut app, "o");
+        assert!(
+            matches!(effects.as_slice(), [Effect::SaveConnection(c)] if c.password.is_none() && c.name == "localhost")
+        );
+        assert_eq!(app.connections.len(), 2);
+
+        // The connected database comes first, then the others by name.
+        let roots: Vec<_> = app
+            .tree
+            .rows
+            .iter()
+            .filter(|r| r.depth == 0)
+            .map(|r| r.label.clone())
+            .collect();
+        assert_eq!(roots, ["postgres", "demo", "shop"]);
+    }
+
+    #[test]
+    fn expanding_another_database_loads_its_catalog() {
+        let mut app = app_with(&["local"], None);
+        key(&mut app, "enter");
+        let effects = db(app.update(Msg::Db(DbEvent::Connected {
+            info: info(),
+            databases: vec![dbinfo("demo"), dbinfo("other")],
+            elapsed: Duration::ZERO,
+        })));
+        assert!(
+            matches!(effects.as_slice(), [DbCommand::LoadCatalog { database, .. }] if database == "demo")
+        );
+        app.update(Msg::Db(DbEvent::CatalogLoaded {
+            catalog: catalog(),
+            elapsed: Duration::ZERO,
+        }));
+        let effects = key(&mut app, "G l");
+        assert!(
+            matches!(effects.as_slice(), [DbCommand::LoadCatalog { database, .. }] if database == "other")
+        );
+        assert_eq!(
+            app.tree.rows.last().unwrap().note.as_deref(),
+            Some("chargement…")
+        );
+        // No second request while loading.
+        assert!(key(&mut app, "h l").is_empty());
+    }
+
+    #[test]
+    fn rescan_from_the_picker() {
+        let mut app = picker_with_server();
+        app.discovering = false;
+        assert!(matches!(
+            key(&mut app, "R").as_slice(),
+            [DbCommand::Discover { .. }]
+        ));
     }
 }

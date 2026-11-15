@@ -54,9 +54,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     match &app.current {
         Some(obj) => {
             let comment = app
-                .session
-                .as_ref()
-                .and_then(|s| s.catalog.as_ref())
+                .catalog(&obj.database)
                 .and_then(|c| c.schemas.iter().find(|s| s.name == obj.schema))
                 .and_then(|s| {
                     s.objects.iter().find(|o| {

@@ -417,7 +417,13 @@ impl App {
         self.data.loading.take()?;
         self.notify(Level::Warning, "Annulation de la requête demandée");
         self.data.error = Some("requête annulée".into());
-        Some(vec![DbCommand::Cancel.into()])
+        let database = self
+            .data
+            .object
+            .as_ref()
+            .map(|o| o.database.clone())
+            .unwrap_or_default();
+        Some(vec![DbCommand::Cancel { database }.into()])
     }
 
     /// Visible rows / total, for the status bar.

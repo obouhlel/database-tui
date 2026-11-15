@@ -195,6 +195,7 @@ fn defaults() -> Vec<(Context, Action, &'static [&'static str])> {
         (Tree, ClearFilter, &["esc"]),
         (Tree, ReloadCatalog, &["R"]),
         (Picker, Connect, &["enter"]),
+        (Picker, Refresh, &["R"]),
         (Schema, ScrollLeft, &["h", "left"]),
         (Schema, ScrollRight, &["l", "right"]),
         (Schema, FirstColumn, &["0"]),

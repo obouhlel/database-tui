@@ -19,7 +19,7 @@ use tokio_postgres::Client;
 use tokio_postgres::error::SqlState;
 
 use super::backend::{Backend, BackendKind, ServerInfo};
-use super::catalog::{Catalog, ObjectRef};
+use super::catalog::{Catalog, DatabaseInfo, ObjectRef};
 use super::data::{DataRequest, RowCount, TextRows};
 use super::schema::ObjectDetails;
 use super::{ConnectError, ConnectRequest};
@@ -171,7 +171,33 @@ impl Backend for PgBackend {
     }
 
     async fn load_catalog(&self, include_system: bool) -> anyhow::Result<Catalog> {
-        catalog::load(&self.catalog, include_system).await
+        catalog::load(&self.catalog, &self.info.database, include_system).await
+    }
+
+    async fn list_databases(&self) -> anyhow::Result<Vec<DatabaseInfo>> {
+        let rows = self
+            .catalog
+            .query(
+                "SELECT d.datname::text, shobj_description(d.oid, 'pg_database'), \
+                        has_database_privilege(d.datname, 'CONNECT'), \
+                        CASE WHEN has_database_privilege(d.datname, 'CONNECT') \
+                             THEN pg_database_size(d.datname) END \
+                 FROM pg_database d \
+                 WHERE d.datallowconn AND NOT d.datistemplate \
+                 ORDER BY d.datname",
+                &[],
+            )
+            .await
+            .map_err(pg_error)?;
+        Ok(rows
+            .iter()
+            .map(|r| DatabaseInfo {
+                name: r.get(0),
+                comment: r.get(1),
+                can_connect: r.get(2),
+                size_bytes: r.get(3),
+            })
+            .collect())
     }
 
     async fn object_details(&self, object: &ObjectRef) -> anyhow::Result<ObjectDetails> {

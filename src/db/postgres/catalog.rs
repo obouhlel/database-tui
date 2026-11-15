@@ -46,7 +46,7 @@ WHERE p.prokind IN ('f', 'p')
       WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
 ORDER BY 1, 2, 4";
 
-pub async fn load(client: &Client, include_system: bool) -> Result<Catalog> {
+pub async fn load(client: &Client, database: &str, include_system: bool) -> Result<Catalog> {
     let params: &[&(dyn tokio_postgres::types::ToSql + Sync)] = &[&include_system];
     let (schemas, relations, functions) = tokio::try_join!(
         client.query(SCHEMAS_SQL, params),
@@ -112,5 +112,8 @@ pub async fn load(client: &Client, include_system: bool) -> Result<Catalog> {
     }
     // User schemas first, `public` leading them; system schemas last.
     schemas.sort_by_key(|s| (s.is_system, s.name != "public", s.name.clone()));
-    Ok(Catalog { schemas })
+    Ok(Catalog {
+        database: database.to_string(),
+        schemas,
+    })
 }

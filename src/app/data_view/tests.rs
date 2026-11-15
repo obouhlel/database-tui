@@ -21,6 +21,7 @@ fn col(name: &str, ty: &str, pk: bool, nullable: bool) -> Column {
 fn details(kind: ObjectKind, columns: Vec<Column>) -> ObjectDetails {
     ObjectDetails {
         object: ObjectRef {
+            database: "demo".into(),
             schema: "shop".into(),
             name: "t".into(),
             kind,

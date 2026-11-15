@@ -13,13 +13,8 @@ use crate::app::{App, Focus};
 pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::Tree;
     let t = app.theme.clone();
-    let count = app
-        .session
-        .as_ref()
-        .and_then(|s| s.catalog.as_ref())
-        .map(|c| c.object_count());
-    let title = match count {
-        Some(n) => format!(" Objets ({n}) "),
+    let title = match &app.session {
+        Some(s) => format!(" {} — {} base(s) ", s.conn.name, s.databases.len()),
         None => " Objets ".to_string(),
     };
     let block = Block::bordered()
@@ -41,11 +36,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     app.tree.viewport = list_area.height as usize;
     app.tree.scroll_into_view();
 
-    let session = app.session.as_ref();
-    if session.is_some_and(|s| s.catalog.is_none()) {
-        let text = format!("{} Chargement…", spinner(app.spinner));
-        frame.render_widget(Paragraph::new(text).style(t.dim()), list_area);
-    } else if app.tree.rows.is_empty() {
+    if app.tree.rows.is_empty() {
         let text = if app.tree.filter.is_empty() {
             "Aucun objet"
         } else {
@@ -76,6 +67,11 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         let mut spans = vec![Span::raw("  ".repeat(row.depth as usize))];
         let arrow = if row.expanded { "▾ " } else { "▸ " };
         let (icon, icon_color, label_style) = match row.kind {
+            RowKind::Database => (
+                arrow,
+                t.accent,
+                Style::new().fg(t.accent).add_modifier(Modifier::BOLD),
+            ),
             RowKind::Schema => (
                 arrow,
                 t.schema,
@@ -88,6 +84,21 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         spans.extend(highlighted(&row.label, &row.highlights, label_style, hl));
         if let Some(n) = row.count {
             spans.push(Span::styled(format!(" {n}"), t.dim()));
+        }
+        if let Some(note) = &row.note {
+            let style = if note == "chargement…" {
+                Style::new().fg(t.info)
+            } else if note == "erreur" || note == "accès refusé" {
+                Style::new().fg(t.warning)
+            } else {
+                t.dim()
+            };
+            let text = if note == "chargement…" {
+                format!(" {} {note}", spinner(app.spinner))
+            } else {
+                format!(" {note}")
+            };
+            spans.push(Span::styled(text, style));
         }
         if selected {
             frame.buffer_mut().set_style(rect, t.selection(focused));

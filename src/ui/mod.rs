@@ -82,6 +82,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Some(Overlay::RowDetail { scroll }) => {
             data_popups::draw_row_detail(frame, app, *scroll, body)
         }
+        Some(Overlay::Login(form)) => popup::draw_login(frame, app, form, body),
+        Some(Overlay::SaveServer(conn)) => popup::draw_save_server(frame, app, conn, body),
         // Drawn inside the Data tab.
         Some(Overlay::DataSearch { .. } | Overlay::FreeWhere(_)) => {}
         Some(Overlay::Command(_)) | None => {}

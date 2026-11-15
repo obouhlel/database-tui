@@ -501,6 +501,7 @@ mod tests {
 
     fn obj(name: &str) -> ObjectRef {
         ObjectRef {
+            database: "demo".into(),
             schema: "shop".into(),
             name: name.into(),
             kind: ObjectKind::Table,

@@ -50,6 +50,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, obj: &ObjectRef, area: Rect) {
     // Summary.
     let d = &app.data;
     let mut first = vec![
+        Span::styled(format!("{} · ", obj.database), t.dim()),
         Span::styled(
             obj.qualified(),
             Style::new()

@@ -28,7 +28,8 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
                     .fg(contrast(color))
                     .add_modifier(Modifier::BOLD),
             ));
-            left.push(Span::raw(format!(" {}@{} ", s.info.user, s.info.database)));
+            let db = app.current_database().unwrap_or(&s.info.database);
+            left.push(Span::raw(format!(" {}@{db} ", s.info.user)));
             if let Some(schema) = app.current_schema() {
                 left.push(sep(app));
                 left.push(Span::raw(format!(" {schema} ")));

@@ -46,6 +46,7 @@ fn connect(app: &mut App) {
             database: "demo".into(),
             tls: false,
         },
+        databases: vec![],
         elapsed: Duration::from_millis(12),
     }));
     let obj = |n: &str, kind| DbObject {
@@ -56,6 +57,7 @@ fn connect(app: &mut App) {
     };
     app.update(Msg::Db(DbEvent::CatalogLoaded {
         catalog: Catalog {
+            database: "demo".into(),
             schemas: vec![Schema {
                 name: "shop".into(),
                 comment: None,
@@ -138,7 +140,7 @@ fn open_object_shows_schema_tab() {
     let mut app = app(ConnectionConfig::named("demo"));
     connect(&mut app);
     let mut effects = Vec::new();
-    for c in KeyChord::parse_seq("j j enter").unwrap() {
+    for c in KeyChord::parse_seq("j j j enter").unwrap() {
         effects.extend(app.update(Msg::Key(KeyEvent::new(c.code, c.mods))));
     }
     let requested: Vec<_> = effects
