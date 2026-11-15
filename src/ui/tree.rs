@@ -9,7 +9,6 @@ use ratatui::widgets::{Block, Paragraph};
 use super::{highlighted, spinner};
 use crate::app::tree::RowKind;
 use crate::app::{App, Focus};
-use crate::db::catalog::ObjectKind;
 
 pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::Tree;
@@ -83,7 +82,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 Style::new().fg(t.schema).add_modifier(Modifier::BOLD),
             ),
             RowKind::Group(_) => (arrow, t.dim, Style::new().fg(t.fg)),
-            RowKind::Object(k) => (icon(k), t.kind_color(k), Style::new().fg(t.fg)),
+            RowKind::Object(k) => ("  ", t.kind_color(k), Style::new().fg(t.kind_color(k))),
         };
         spans.push(Span::styled(icon, Style::new().fg(icon_color)));
         spans.extend(highlighted(&row.label, &row.highlights, label_style, hl));
@@ -116,18 +115,5 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
             frame
                 .set_cursor_position((x.min(filter_area.right().saturating_sub(1)), filter_area.y));
         }
-    }
-}
-
-fn icon(kind: ObjectKind) -> &'static str {
-    match kind {
-        ObjectKind::Table => "▦ ",
-        ObjectKind::PartitionedTable => "▤ ",
-        ObjectKind::ForeignTable => "⇄ ",
-        ObjectKind::View => "◫ ",
-        ObjectKind::MaterializedView => "◩ ",
-        ObjectKind::Sequence => "# ",
-        ObjectKind::Function => "ƒ ",
-        ObjectKind::Procedure => "℘ ",
     }
 }

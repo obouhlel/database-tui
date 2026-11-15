@@ -227,7 +227,7 @@ fn columns_table(d: &ObjectDetails) -> SectionTable {
                 keys.push("PK".to_string());
             }
             if let Some(r) = &c.references {
-                keys.push(format!("FK → {r}"));
+                keys.push(format!("FK {r}"));
             }
             let key_style = if fk.is_some() {
                 CellStyle::Link
@@ -399,14 +399,9 @@ fn relations_table(d: &ObjectDetails) -> SectionTable {
         .chain(incoming)
         .map(|(out, fk)| {
             let (dir, other, other_cols, own_cols) = if out {
-                ("→ référence", &fk.to, &fk.to_columns, &fk.from_columns)
+                ("sortante", &fk.to, &fk.to_columns, &fk.from_columns)
             } else {
-                (
-                    "← référencée par",
-                    &fk.from,
-                    &fk.from_columns,
-                    &fk.to_columns,
-                )
+                ("entrante", &fk.from, &fk.from_columns, &fk.to_columns)
             };
             (
                 vec![
@@ -574,7 +569,7 @@ mod tests {
         assert_eq!(v.current_section(), Some(Section::Columns));
         assert_eq!(v.columns.grid.rows.len(), 2);
         assert_eq!(v.columns.grid.rows[0][4].text, "PK");
-        assert_eq!(v.columns.grid.rows[1][4].text, "FK → shop.customers(id)");
+        assert_eq!(v.columns.grid.rows[1][4].text, "FK shop.customers(id)");
         assert_eq!(
             v.columns.links[1].as_ref().map(|o| o.name.as_str()),
             Some("customers")

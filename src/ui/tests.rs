@@ -106,9 +106,9 @@ fn main_screen_tree_and_status() {
     connect(&mut app);
     let screen = render(&mut app, 100, 20);
     assert!(screen.contains("▾ shop"), "{screen}");
-    assert!(screen.contains("▦ customers"), "{screen}");
+    assert!(screen.contains("    customers"), "{screen}");
     assert!(screen.contains("NORMAL"), "{screen}");
-    assert!(screen.contains("● demo"), "{screen}");
+    assert!(screen.contains(" demo "), "{screen}");
     assert!(screen.contains("pgtui@demo"), "{screen}");
     assert!(screen.contains("1 Schema"), "{screen}");
     assert!(!screen.contains("PRODUCTION"), "{screen}");
@@ -122,7 +122,7 @@ fn production_banner() {
     connect(&mut app);
     let screen = render(&mut app, 120, 20);
     assert!(
-        screen.lines().next().unwrap().contains("PRODUCTION — prod"),
+        screen.lines().next().unwrap().contains("PRODUCTION  prod "),
         "{screen}"
     );
     assert!(screen.contains("PROD"), "{screen}");

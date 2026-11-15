@@ -62,6 +62,12 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
         .max()
         .unwrap_or(0)
         + 2;
+    let target_w = app
+        .connections
+        .iter()
+        .map(|(c, _)| c.target().chars().count())
+        .max()
+        .unwrap_or(0);
     for (i, (conn, _)) in app
         .connections
         .iter()
@@ -75,17 +81,14 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
         };
         let selected = i == app.picker_cursor;
         let color = conn.parsed_color().unwrap_or(t.accent);
+        // The connection colour is carried by the name, nothing else.
         let mut spans = vec![
-            Span::styled(
-                if selected { "▶ " } else { "  " },
-                Style::new().fg(t.accent),
-            ),
-            Span::styled("● ", Style::new().fg(color)),
+            Span::raw("  "),
             Span::styled(
                 format!("{:<name_w$}", conn.name),
-                Style::new().fg(t.fg).add_modifier(Modifier::BOLD),
+                Style::new().fg(color).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(conn.target(), t.dim()),
+            Span::styled(format!("{:<target_w$}", conn.target()), t.dim()),
             Span::styled(format!("  ssl:{}", conn.sslmode.as_str()), t.dim()),
         ];
         if conn.read_only {
@@ -133,7 +136,7 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
         lines.extend(
             app.warnings
                 .iter()
-                .map(|w| Line::styled(format!("  • {w}"), Style::new().fg(t.warning))),
+                .map(|w| Line::styled(format!("  - {w}"), Style::new().fg(t.warning))),
         );
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), warn_area);
     }

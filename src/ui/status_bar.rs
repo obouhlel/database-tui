@@ -22,7 +22,7 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
         Some(s) if app.screen == Screen::Main => {
             let color = s.conn.parsed_color().unwrap_or(t.accent);
             left.push(Span::styled(
-                format!(" ● {} ", s.conn.name),
+                format!(" {} ", s.conn.name),
                 Style::new()
                     .bg(color)
                     .fg(contrast(color))
@@ -38,7 +38,7 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
             if let Some(op) = &app.last_op {
                 left.push(sep(app));
                 left.push(Span::raw(format!(
-                    " ⏱ {} ({}) ",
+                    " {} ({}) ",
                     fmt_duration(op.elapsed),
                     op.label
                 )));
@@ -113,7 +113,7 @@ pub fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
         vec![
             ("Enter".into(), "valider"),
             ("Esc".into(), "effacer"),
-            ("↑↓".into(), "naviguer"),
+            ("Up/Down".into(), "naviguer"),
         ]
     } else {
         match (app.screen, app.focus) {

@@ -150,11 +150,8 @@ fn build_line<'a>(
 
 /// First line of `s`, truncated with `…` and padded to exactly `width` columns.
 pub fn fit(s: &str, width: usize) -> String {
-    let mut first = s.lines().next().unwrap_or("");
+    let first = s.lines().next().unwrap_or("");
     let multiline = s.contains('\n');
-    if first.is_empty() && multiline {
-        first = "↵";
-    }
     let mut out = String::new();
     let mut used = 0;
     let mut truncated = false;
@@ -193,7 +190,7 @@ mod tests {
         assert_eq!(fit("日本語", 5), "日本…");
         assert_eq!(fit("日本語", 4), "日… ");
         assert_eq!(fit("line1\nline2", 10), "line1…    ");
-        assert_eq!(fit("\nx", 3), "↵… ");
+        assert_eq!(fit("\nx", 3), "…  ");
         assert_eq!(fit("abc", 0), "");
     }
 }

@@ -80,11 +80,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 fn draw_prod_banner(frame: &mut Frame, app: &App, area: Rect) {
     let Some(s) = &app.session else { return };
     let t = &app.theme;
-    let mut text = format!(" ⚠ PRODUCTION — {} ({})", s.conn.name, s.conn.target());
+    let mut text = format!(" PRODUCTION  {}  {}", s.conn.name, s.conn.target());
     if s.conn.read_only {
-        text.push_str(" — lecture seule");
+        text.push_str("  lecture seule");
     } else {
-        text.push_str(" — chaque commit demandera une confirmation explicite");
+        text.push_str("  commit sur confirmation explicite");
     }
     let style = Style::new()
         .bg(t.prod_banner_bg)

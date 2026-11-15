@@ -489,7 +489,7 @@ mod tests {
             r.feed(&km, TREE, chord("j")),
             Resolved::Action(Action::Filter)
         );
-        assert_eq!(km.keys_for(Context::Tree, Action::Down), vec!["↓"]);
+        assert_eq!(km.keys_for(Context::Tree, Action::Down), vec!["Down"]);
     }
 
     #[test]

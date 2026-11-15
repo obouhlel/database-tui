@@ -44,7 +44,7 @@ pub fn draw_password(
     frame.render_widget(Clear, rect);
     frame.render_widget(block, rect);
 
-    let masked = "•".repeat(input.text().chars().count());
+    let masked = "*".repeat(input.text().chars().count());
     let mut lines = vec![
         Line::styled(conn.target(), t.dim()),
         Line::default(),

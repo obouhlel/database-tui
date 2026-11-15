@@ -63,7 +63,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, obj: &ObjectRef, area: Rect) {
         Span::styled(
             match &state {
                 Some(DetailsState::Loading) => format!("  {} actualisation…", spinner(app.spinner)),
-                Some(DetailsState::Failed(e)) => format!("  ⚠ {e}"),
+                Some(DetailsState::Failed(e)) => format!("  erreur : {e}"),
                 _ => String::new(),
             },
             Style::new().fg(t.warning),
@@ -72,7 +72,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, obj: &ObjectRef, area: Rect) {
     if let Some(s) = &details.stats {
         let rows = s.estimated_rows.map_or_else(
             || "lignes : inconnu (jamais analysée)".to_string(),
-            |n| format!("≈ {} lignes", format::count(n)),
+            |n| format!("{} lignes (estimation)", format::count(n)),
         );
         header.push(Line::styled(
             format!(
