@@ -47,6 +47,9 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
                     op.label
                 )));
             }
+            if s.conn.tunnel_cmd.is_some() {
+                left.push(badge(" TUNNEL ", t.info));
+            }
             if s.conn.read_only {
                 left.push(badge(" RO ", t.warning));
             }

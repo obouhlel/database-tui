@@ -7,6 +7,7 @@ pub mod data;
 pub mod discover;
 pub mod postgres;
 pub mod schema;
+pub mod tunnel;
 pub mod worker;
 
 use std::path::PathBuf;

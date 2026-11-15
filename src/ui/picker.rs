@@ -101,6 +101,9 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
                     Span::styled(format!("{:<target_w$}", conn.target()), t.dim()),
                     Span::styled(format!("  ssl:{}", conn.sslmode.as_str()), t.dim()),
                 ];
+                if conn.tunnel_cmd.is_some() {
+                    spans.push(Span::styled("  tunnel", Style::new().fg(t.info)));
+                }
                 if conn.read_only {
                     spans.push(Span::styled(
                         "  RO",

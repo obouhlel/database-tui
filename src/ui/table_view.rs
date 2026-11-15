@@ -156,6 +156,11 @@ pub fn draw(
                 } else {
                     row_bg
                 });
+                if opts.cell_cursor {
+                    // Grey row background: default text colour stays readable
+                    // in any terminal palette.
+                    style = style.fg(theme.fg);
+                }
                 if !opts.cell_cursor && opts.focused {
                     style = style.add_modifier(Modifier::BOLD);
                 }

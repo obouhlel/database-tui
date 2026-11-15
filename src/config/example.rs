@@ -6,7 +6,7 @@ pub const EXAMPLE_CONFIG: &str = r##"# pgtui configuration
 page_size = 200               # lignes chargées par page dans la vue Data
 default_connection = "local"  # connexion présélectionnée dans le sélecteur
 keymap = "default"            # preset (vim + flèches) ; surcharges dans [keymap]
-theme = "dark"                # "dark" | "light" ; couleurs surchargeables dans [theme]
+theme = "terminal"            # "terminal" (couleurs du terminal) | "dark" | "light" ; surcharges dans [theme]
 mouse = false                 # true : capture souris (désactive la sélection native du terminal)
 statement_timeout_secs = 0    # timeout des requêtes en secondes, 0 = aucun
 show_system_schemas = false   # afficher pg_catalog / information_schema dans l'arbre

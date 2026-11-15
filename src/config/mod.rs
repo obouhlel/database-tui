@@ -66,7 +66,7 @@ pub struct General {
     pub default_connection: Option<String>,
     /// Keymap preset; `[keymap]` overrides are applied on top of it.
     pub keymap: String,
-    /// `dark` or `light`.
+    /// `terminal` (the terminal's own colours), `dark` or `light`.
     pub theme: String,
     /// Mouse capture (disables the terminal's native text selection).
     pub mouse: bool,
@@ -100,7 +100,7 @@ impl Default for General {
             page_size: 200,
             default_connection: None,
             keymap: "default".into(),
-            theme: "dark".into(),
+            theme: "terminal".into(),
             mouse: false,
             statement_timeout_secs: 0,
             show_system_schemas: false,
@@ -216,6 +216,14 @@ pub struct ConnectionConfig {
     /// Overrides `general.statement_timeout_secs`.
     #[serde(default)]
     pub statement_timeout_secs: Option<u64>,
+    /// Command opening a tunnel before connecting, e.g.
+    /// `ssh -N -L {port}:db.internal:5432 bastion`; `{port}` is replaced by
+    /// a free local port and pgtui connects to `127.0.0.1:{port}`.
+    #[serde(default)]
+    pub tunnel_cmd: Option<String>,
+    /// Seconds to wait for the tunnel port (default 15).
+    #[serde(default)]
+    pub tunnel_timeout_secs: Option<u64>,
 }
 
 fn default_host() -> String {
@@ -244,6 +252,8 @@ impl ConnectionConfig {
             color: None,
             production: None,
             statement_timeout_secs: None,
+            tunnel_cmd: None,
+            tunnel_timeout_secs: None,
         }
     }
 
@@ -392,9 +402,9 @@ impl Config {
                 g.keymap
             )));
         }
-        if !matches!(g.theme.as_str(), "dark" | "light") {
+        if !matches!(g.theme.as_str(), "terminal" | "dark" | "light") {
             return Err(ConfigError::Invalid(format!(
-                "general.theme must be `dark` or `light`, got `{}`",
+                "general.theme must be `terminal`, `dark` or `light`, got `{}`",
                 g.theme
             )));
         }
@@ -440,6 +450,14 @@ impl Config {
                     "connection `{}`: plain-text `password` in config.toml is discouraged, prefer password_env or password_cmd",
                     c.name
                 ));
+            }
+            if let Some(cmd) = &c.tunnel_cmd
+                && !cmd.contains(crate::db::tunnel::PORT_PLACEHOLDER)
+            {
+                return Err(ConfigError::Invalid(format!(
+                    "connection `{}`: tunnel_cmd must contain {{port}} (the local port chosen by pgtui)",
+                    c.name
+                )));
             }
             if c.sslrootcert.is_some()
                 && !matches!(c.sslmode, SslMode::VerifyCa | SslMode::VerifyFull)
@@ -514,7 +532,7 @@ mod tests {
         let (config, warnings) = parse("").unwrap();
         assert!(warnings.is_empty());
         assert_eq!(config.general.page_size, 200);
-        assert_eq!(config.general.theme, "dark");
+        assert_eq!(config.general.theme, "terminal");
         assert_eq!(config.editor.mode, EditorMode::Classic);
         assert!(config.connections.is_empty());
     }
@@ -600,6 +618,25 @@ mod tests {
         assert!(parse("[general]\npage_size = 0").is_err());
         assert!(parse("[general]\ntheme = \"pink\"").is_err());
         assert!(parse("[general]\nkeymap = \"emacs\"").is_err());
+    }
+
+    #[test]
+    fn tunnel_command() {
+        let (config, _) = parse(
+            "[[connections]]\nname = \"p\"\nhost = \"db.internal\"\n\
+             tunnel_cmd = \"ssh -N -L {port}:db.internal:5432 bastion\"",
+        )
+        .unwrap();
+        assert!(
+            config.connections[0]
+                .tunnel_cmd
+                .as_deref()
+                .unwrap()
+                .contains("{port}")
+        );
+        let err = parse("[[connections]]\nname = \"p\"\ntunnel_cmd = \"ssh -L 5433:db:5432 b\"")
+            .unwrap_err();
+        assert!(err.to_string().contains("{port}"), "{err}");
     }
 
     #[test]

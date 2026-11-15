@@ -112,6 +112,9 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         };
         kv("Serveur", format!("PostgreSQL {}", s.info.version));
         kv("Cible", s.conn.target());
+        if let Some(cmd) = &s.conn.tunnel_cmd {
+            kv("Tunnel", cmd.clone());
+        }
         kv("Utilisateur", s.info.user.clone());
         kv("Base", s.info.database.clone());
         kv(

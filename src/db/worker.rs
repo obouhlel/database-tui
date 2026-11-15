@@ -101,6 +101,8 @@ pub enum DbEvent {
         error: String,
     },
     Discovered(Vec<DiscoveredServer>),
+    /// A step of a long operation (opening a tunnel, connecting).
+    Progress(String),
     ConnectionLost(String),
 }
 
@@ -119,6 +121,8 @@ struct Pool {
     template: ConnectRequest,
     on_lost: super::postgres::OnConnectionLost,
     backends: Mutex<HashMap<String, LazyBackend>>,
+    /// Shared by every database of the server; killed when the pool is dropped.
+    tunnel: Option<std::sync::Mutex<super::tunnel::Tunnel>>,
 }
 
 impl Pool {
@@ -187,11 +191,44 @@ async fn run(mut commands: UnboundedReceiver<DbCommand>, events: UnboundedSender
                     })
                 };
                 let primary = request.conn.effective_database();
+                let mut template = request.clone();
+                let mut tunnel = None;
+                if let Some(cmd) = request.conn.tunnel_cmd.clone() {
+                    send(&events, DbEvent::Progress("Ouverture du tunnel…".into()));
+                    let timeout =
+                        Duration::from_secs(request.conn.tunnel_timeout_secs.unwrap_or(15));
+                    match super::tunnel::open(&cmd, timeout).await {
+                        Ok(t) => {
+                            template.conn.host = "127.0.0.1".into();
+                            template.conn.port = t.port;
+                            tunnel = Some(t);
+                            send(
+                                &events,
+                                DbEvent::Progress("Tunnel ouvert, connexion…".into()),
+                            );
+                        }
+                        Err(e) => {
+                            send(
+                                &events,
+                                DbEvent::ConnectFailed {
+                                    error: format!("{e:#}"),
+                                    password_required: false,
+                                },
+                            );
+                            continue;
+                        }
+                    }
+                }
+                let has_tunnel = tunnel.is_some();
                 let p = Arc::new(Pool {
-                    template: request.clone(),
-                    on_lost,
+                    template,
+                    on_lost: on_lost.clone(),
                     backends: Mutex::default(),
+                    tunnel: tunnel.map(std::sync::Mutex::new),
                 });
+                if has_tunnel {
+                    watch_tunnel(Arc::downgrade(&p), on_lost);
+                }
                 match p.get(&primary).await {
                     Ok(b) => {
                         let info = b.info().clone();
@@ -367,6 +404,22 @@ async fn run(mut commands: UnboundedReceiver<DbCommand>, events: UnboundedSender
         }
     }
     tracing::debug!("db worker stopped");
+}
+
+/// Reports the death of the tunnel process (ssh killed, network down).
+fn watch_tunnel(pool: std::sync::Weak<Pool>, on_lost: super::postgres::OnConnectionLost) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let Some(p) = pool.upgrade() else { return };
+            let reason = p.tunnel.as_ref().and_then(|t| t.lock().ok()?.exited());
+            if let Some(reason) = reason {
+                tracing::warn!("{reason}");
+                on_lost(reason);
+                return;
+            }
+        }
+    });
 }
 
 fn send(events: &UnboundedSender<DbEvent>, ev: DbEvent) {

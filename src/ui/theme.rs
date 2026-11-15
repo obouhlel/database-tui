@@ -78,6 +78,50 @@ impl Theme {
         }
     }
 
+    /// Only the terminal's own colours (default foreground / background and
+    /// the 16 ANSI colours): pgtui follows whatever theme the terminal uses,
+    /// light or dark, like nvim without `termguicolors`.
+    pub fn terminal() -> Self {
+        Self {
+            bg: Color::Reset,
+            fg: Color::Reset,
+            dim: Color::DarkGray,
+            accent: Color::Blue,
+            border: Color::DarkGray,
+            border_focus: Color::Blue,
+            selection_bg: Color::Blue,
+            selection_fg: Color::Black,
+            selection_inactive_bg: Color::DarkGray,
+            tab_active_fg: Color::Black,
+            tab_active_bg: Color::Blue,
+            status_bg: Color::Reset,
+            status_fg: Color::Reset,
+            error: Color::Red,
+            warning: Color::Yellow,
+            success: Color::Green,
+            info: Color::Cyan,
+            matched: Color::Yellow,
+            schema: Color::Magenta,
+            table: Color::Blue,
+            view: Color::Cyan,
+            matview: Color::Cyan,
+            sequence: Color::Yellow,
+            function: Color::Green,
+            null: Color::DarkGray,
+            prod_banner_bg: Color::Red,
+            prod_banner_fg: Color::White,
+            header_bg: Color::Reset,
+            key: Color::Yellow,
+            link: Color::Cyan,
+            sql_keyword: Color::Magenta,
+            sql_type: Color::Cyan,
+            sql_string: Color::Green,
+            sql_number: Color::Yellow,
+            sql_comment: Color::DarkGray,
+            line_number: Color::DarkGray,
+        }
+    }
+
     pub fn light() -> Self {
         Self {
             bg: Color::Reset,
@@ -122,10 +166,10 @@ impl Theme {
     /// Base theme by name, with `[theme]` overrides. Returns warnings for
     /// unknown names or colours.
     pub fn from_config(name: &str, overrides: &BTreeMap<String, String>) -> (Self, Vec<String>) {
-        let mut theme = if name == "light" {
-            Self::light()
-        } else {
-            Self::dark()
+        let mut theme = match name {
+            "light" => Self::light(),
+            "dark" => Self::dark(),
+            _ => Self::terminal(),
         };
         let mut warnings = Vec::new();
         for (key, value) in overrides {
@@ -198,6 +242,28 @@ impl Theme {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_theme_uses_only_terminal_colours() {
+        let t = Theme::terminal();
+        let c = [
+            t.bg,
+            t.fg,
+            t.dim,
+            t.accent,
+            t.selection_bg,
+            t.matched,
+            t.sql_keyword,
+            t.null,
+            t.header_bg,
+        ];
+        assert!(
+            c.iter()
+                .all(|c| !matches!(c, Color::Rgb(..) | Color::Indexed(_))),
+            "{c:?}"
+        );
+        assert_eq!(Theme::from_config("terminal", &BTreeMap::new()).0, t);
+    }
 
     #[test]
     fn overrides() {

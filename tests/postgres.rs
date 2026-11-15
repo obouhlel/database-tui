@@ -956,3 +956,118 @@ async fn next_event(rx: &mut tokio::sync::mpsc::UnboundedReceiver<DbEvent>) -> D
         .unwrap()
         .unwrap()
 }
+
+// ---------------------------------------------------------------- tunnels
+
+/// `tunnel_cmd` forwarding to the demo database (stands in for ssh -L).
+fn forward_cmd(url: &str, prefix: &str) -> String {
+    let (conn, _) = db::connection_from_url("t", url).unwrap();
+    format!(
+        "{prefix}python3 -I {}/tests/fixtures/forward.py {{port}} {} {}",
+        env!("CARGO_MANIFEST_DIR"),
+        conn.host,
+        conn.port
+    )
+}
+
+#[tokio::test]
+async fn connects_through_a_tunnel_command() {
+    let Some(url) = test_url() else { return };
+    let (tx, mut rx) = unbounded_channel();
+    let commands = worker::spawn(tx);
+    let mut req = request(&url);
+    // An unreachable host: only the tunnel leads to the server.
+    req.conn.host = "db.unreachable.invalid".into();
+    req.conn.tunnel_cmd = Some(forward_cmd(&url, ""));
+    commands
+        .send(DbCommand::Connect {
+            request: Box::new(req),
+            resolve_password: false,
+        })
+        .unwrap();
+    let mut progress = Vec::new();
+    loop {
+        match next_event(&mut rx).await {
+            DbEvent::Progress(p) => progress.push(p),
+            DbEvent::Connected {
+                info, databases, ..
+            } => {
+                assert_eq!(info.database, "demo");
+                assert!(databases.iter().any(|d| d.name == "postgres"));
+                break;
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    assert_eq!(
+        progress,
+        ["Ouverture du tunnel…", "Tunnel ouvert, connexion…"]
+    );
+    // Other databases go through the same tunnel.
+    commands
+        .send(DbCommand::LoadCatalog {
+            database: "postgres".into(),
+            include_system: false,
+        })
+        .unwrap();
+    assert!(matches!(
+        next_event(&mut rx).await,
+        DbEvent::CatalogLoaded { .. }
+    ));
+}
+
+#[tokio::test]
+async fn tunnel_failure_and_death_are_reported() {
+    let Some(url) = test_url() else { return };
+    let (tx, mut rx) = unbounded_channel();
+    let commands = worker::spawn(tx);
+
+    let mut req = request(&url);
+    req.conn.tunnel_cmd =
+        Some("echo 'ssh: Could not resolve hostname bastion' >&2; exit 255 # {port}".into());
+    commands
+        .send(DbCommand::Connect {
+            request: Box::new(req),
+            resolve_password: false,
+        })
+        .unwrap();
+    loop {
+        match next_event(&mut rx).await {
+            DbEvent::Progress(_) => {}
+            DbEvent::ConnectFailed {
+                error,
+                password_required,
+            } => {
+                assert!(
+                    error.contains("Could not resolve hostname bastion"),
+                    "{error}"
+                );
+                assert!(!password_required);
+                break;
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    // A tunnel that dies after 3 s: the session is reported lost.
+    let mut req = request(&url);
+    req.conn.tunnel_cmd = Some(forward_cmd(&url, "timeout 3 "));
+    commands
+        .send(DbCommand::Connect {
+            request: Box::new(req),
+            resolve_password: false,
+        })
+        .unwrap();
+    let lost = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            match rx.recv().await.unwrap() {
+                DbEvent::ConnectionLost(msg) => return msg,
+                DbEvent::Progress(_) | DbEvent::Connected { .. } => {}
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+    })
+    .await
+    .expect("tunnel death reported");
+    assert!(!lost.is_empty());
+}

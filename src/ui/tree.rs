@@ -105,7 +105,18 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         }
         let mut line = Line::from(spans);
         if selected {
-            line = line.patch_style(t.selection(focused));
+            // Unfocused, the grey background needs the default text colour
+            // to stay readable whatever the palette.
+            let style = if focused {
+                t.selection(true)
+            } else {
+                t.selection(false).fg(t.fg)
+            };
+            // Span colours win over the line style: patch every span.
+            for span in &mut line.spans {
+                span.style = span.style.patch(style);
+            }
+            line = line.patch_style(style);
         }
         frame.render_widget(line, rect);
     }

@@ -1273,6 +1273,12 @@ impl App {
                 self.on_data_event(ev);
                 Vec::new()
             }
+            DbEvent::Progress(label) => {
+                if let Some(b) = &mut self.busy {
+                    b.label = label;
+                }
+                Vec::new()
+            }
             DbEvent::Discovered(servers) => {
                 self.on_discovered(servers);
                 Vec::new()
