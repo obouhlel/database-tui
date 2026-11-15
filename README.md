@@ -85,7 +85,7 @@ Fichier : `~/.config/pgtui/config.toml`, créé avec un exemple commenté au pre
 page_size = 200               # lignes par page dans la vue Data
 default_connection = "local"  # présélectionnée dans le sélecteur
 keymap = "default"            # preset ; surcharges dans [keymap]
-theme = "dark"                # "dark" | "light"
+theme = "terminal"            # "terminal" (couleurs du terminal) | "dark" | "light"
 mouse = false                 # capture souris (désactive la sélection native du terminal)
 statement_timeout_secs = 0    # 0 = aucun timeout
 show_system_schemas = false
@@ -107,6 +107,7 @@ password_env = "PGPASSWORD_LOCAL"      # variable d'environnement
 sslmode = "prefer"                     # disable | prefer | require | verify-ca | verify-full
 # sslrootcert = "/path/ca.pem"         # CA pour verify-ca / verify-full
 read_only = false                      # true : session en default_transaction_read_only = on
+# tunnel_cmd = "ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes -L {port}:db.interne:5432 bastion"
 color = "green"                        # couleur du bandeau ; "red" => production
 # production = true                    # bandeau permanent + confirmation avant tout commit
 # statement_timeout_secs = 30
@@ -132,7 +133,32 @@ expand = ["l", "right", "enter"]
 
 Contextes : `global`, `picker`, `tree`, `center`, `schema`, `data`. Notation : `ctrl+p`, `alt+enter`, `shift+tab`, `f5`, `space`, `gg` (séquence), `ctrl+w h` (séquence avec modificateur). La liste des actions et leur nom figurent dans l'aide (`?`). Une surcharge remplace les touches par défaut de l'action, et une touche réaffectée est retirée de son ancienne action.
 
+### Tunnel SSH (ou autre)
+
+Pour une base joignable seulement par rebond, `tunnel_cmd` donne la commande qui ouvre le tunnel ; `{port}` y est remplacé par un port local libre choisi par pgtui :
+
+```toml
+[[connections]]
+name = "prod"
+host = "db.interne"          # informatif : la connexion passe par le tunnel
+user = "app"
+database = "shop"
+password_cmd = "pass show db/prod"
+tunnel_cmd = "ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes -L {port}:db.interne:5432 bastion"
+# tunnel_timeout_secs = 15
+```
+
+À la connexion, pgtui lance la commande (stdin fermé : elle ne doit rien demander, d'où `BatchMode=yes` avec une clé ou ssh-agent), attend que le port réponde, puis se connecte à `127.0.0.1:{port}`. Toutes les bases du serveur passent par ce tunnel. Si la commande échoue, son message d'erreur (stderr) s'affiche ; si le tunnel tombe, la session est signalée « déconnectée » et `:reconnect` le relance. Le processus est arrêté à la déconnexion et en quittant. Toute commande qui ouvre un port local convient (`kubectl port-forward`, `cloud-sql-proxy`…).
+
+![Connexion par tunnel](docs/screenshots/17-tunnel.png)
+
 ### Thème
+
+Par défaut (`theme = "terminal"`), pgtui n'utilise que les couleurs de votre terminal (texte et fond par défaut, 16 couleurs ANSI), comme nvim sans `termguicolors` : il reprend automatiquement le thème du terminal, clair ou sombre. `dark` et `light` sont des thèmes en couleurs exactes (truecolor).
+
+| Terminal Tokyo Night | Terminal One Light | Terminal Gruvbox |
+|---|---|---|
+| ![](docs/screenshots/18-theme-tokyonight.png) | ![](docs/screenshots/18-theme-onelight.png) | ![](docs/screenshots/18-theme-gruvbox.png) |
 
 ```toml
 [theme]

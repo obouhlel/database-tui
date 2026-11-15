@@ -26,6 +26,13 @@ database = "demo"
 password_cmd = "printf pgtui"
 color = "cyan"
 [[connections]]
+name = "via-tunnel"
+host = "db.interne"
+user = "pgtui"
+database = "demo"
+password_cmd = "printf pgtui"
+tunnel_cmd = "python3 -I ROOT/tests/fixtures/forward.py {port} 127.0.0.1 5433"
+[[connections]]
 name = "prod-demo"
 port = 5433
 user = "pgtui"
@@ -34,6 +41,7 @@ password_cmd = "printf pgtui"
 read_only = true
 color = "red"
 TOML
+sed -i "s|ROOT|$ROOT|" "$WORK/config/pgtui/config.toml"
 cat > "$WORK/tmux.conf" <<'TMUX'
 set -g default-terminal "tmux-256color"
 set -as terminal-features ",*:RGB"
@@ -52,9 +60,16 @@ start() { # args, width, height
   sleep 1.5
 }
 keys() { for k in "$@"; do tmux send-keys -t pg -- "$k"; sleep 0.15; done; sleep 0.6; }
-shot() {
+shot() { # name, title, [palette]
   tmux capture-pane -e -N -p -t pg > "$WORK/$1.ans"
-  python3 -I "$HERE/ansi2html.py" "$WORK/$1.ans" "$WORK/$1.html" "$2"
+  python3 -I "$HERE/ansi2html.py" "$WORK/$1.ans" "$WORK/$1.html" "$2" "${3:-tokyonight}"
+}
+# The same screen in several terminal palettes (theme "terminal").
+palettes() { # name, title
+  tmux capture-pane -e -N -p -t pg > "$WORK/$1.ans"
+  for p in tokyonight onelight gruvbox; do
+    python3 -I "$HERE/ansi2html.py" "$WORK/$1.ans" "$WORK/$1-$p.html" "$2 — terminal $p" "$p"
+  done
 }
 
 start "" 110 18; shot 01-selecteur "pgtui — connexions"
@@ -75,6 +90,13 @@ keys Escape f; keys BTab I; keys Tab; keys '%' z o '%'; sleep 0.3; shot 11-data-
 keys Escape; keys g g j Enter; keys j j j j j j j j j j j j j j; sleep 0.3; shot 12-data-detail "pgtui — Data : détail d'une ligne"
 keys Escape; keys C-h / o r d e r s Enter Enter; sleep 1
 keys '$' h s s; sleep 1; keys V j j j; shot 13-data-tri "pgtui — Data : tri décroissant et sélection"
+
+start "--connection via-tunnel" 130 22
+keys / c u s t Enter Enter 2; sleep 1.5; shot 17-tunnel "pgtui — connexion par tunnel (tunnel_cmd)"
+keys C-h 1; sleep 0.8; keys C-l; sleep 0.3
+start "--connection demo" 130 26
+keys / o r d e r s Enter Enter 2; sleep 1; keys l l l s s; sleep 1; keys / p a i d Enter; sleep 0.5
+palettes 18-theme "pgtui — thème terminal"
 
 # Discovery scenes: need a server on 127.0.0.1:5432 whose `postgres` user has
 # the password $PGTUI_SHOT_PASSWORD (default: secret).

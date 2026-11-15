@@ -1,16 +1,35 @@
 """Used by capture.sh. Convert `tmux capture-pane -e -p` output (ANSI SGR) to a standalone HTML page
-that looks like a terminal window. Usage: ansi2html.py in.ans out.html "title"
+that looks like a terminal window.
+Usage: ansi2html.py in.ans out.html "title" [tokyonight|onelight|gruvbox]
 """
 import html
 import re
 import sys
 import unicodedata
 
-FG, BG = "#c0caf5", "#1a1b26"
-BASE16 = [
-    "#15161e", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#a9b1d6",
-    "#414868", "#ff899d", "#9fe044", "#faba4a", "#8db0ff", "#c7a9ff", "#a4daff", "#c0caf5",
-]
+# Terminal palettes: default foreground / background, the 16 ANSI colours,
+# and the window chrome. pgtui's "terminal" theme only uses these, so the
+# same capture rendered with another palette shows what it looks like in
+# another terminal theme.
+PALETTES = {
+    "tokyonight": {
+        "fg": "#c0caf5", "bg": "#1a1b26", "bar": "#24283b", "page": "#0f1018",
+        "ansi": ["#15161e", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#a9b1d6",
+                 "#414868", "#ff899d", "#9fe044", "#faba4a", "#8db0ff", "#c7a9ff", "#a4daff", "#c0caf5"],
+    },
+    "onelight": {
+        "fg": "#383a42", "bg": "#fafafa", "bar": "#e5e5e6", "page": "#d4d4d8",
+        "ansi": ["#383a42", "#e45649", "#50a14f", "#c18401", "#4078f2", "#a626a4", "#0184bc", "#a0a1a7",
+                 "#a0a1a7", "#e45649", "#50a14f", "#c18401", "#4078f2", "#a626a4", "#0184bc", "#ffffff"],
+    },
+    "gruvbox": {
+        "fg": "#ebdbb2", "bg": "#282828", "bar": "#3c3836", "page": "#1d2021",
+        "ansi": ["#282828", "#cc241d", "#98971a", "#d79921", "#458588", "#b16286", "#689d6a", "#a89984",
+                 "#928374", "#fb4934", "#b8bb26", "#fabd2f", "#83a598", "#d3869b", "#8ec07c", "#ebdbb2"],
+    },
+}
+PALETTE = PALETTES[sys.argv[4] if len(sys.argv) > 4 else "tokyonight"]
+FG, BG, BASE16 = PALETTE["fg"], PALETTE["bg"], PALETTE["ansi"]
 
 
 def xterm256(n):
@@ -118,10 +137,10 @@ def main():
     src, dst, title = sys.argv[1], sys.argv[2], sys.argv[3]
     body = convert(open(src, encoding="utf-8").read())
     page = f"""<!doctype html><html><head><meta charset="utf-8"><style>
-body {{ margin:0; background:#0f1018; display:inline-block; padding:24px; }}
+body {{ margin:0; background:{PALETTE["page"]}; display:inline-block; padding:24px; }}
 .win {{ background:{BG}; border-radius:10px; box-shadow:0 12px 40px rgba(0,0,0,.55); overflow:hidden; }}
-.bar {{ height:30px; background:#24283b; display:flex; align-items:center; padding:0 12px; gap:8px;
-        font:13px 'DejaVu Sans',sans-serif; color:#a9b1d6; }}
+.bar {{ height:30px; background:{PALETTE["bar"]}; display:flex; align-items:center; padding:0 12px; gap:8px;
+        font:13px 'DejaVu Sans',sans-serif; color:{FG}; }}
 .dot {{ width:12px; height:12px; border-radius:50%; }}
 .title {{ flex:1; text-align:center; margin-right:52px; }}
 pre {{ margin:0; padding:10px 12px; font-family:'JetBrains Mono','DejaVu Sans Mono','WenQuanYi Zen Hei Mono','Noto Color Emoji',monospace;
