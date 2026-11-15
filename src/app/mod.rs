@@ -446,7 +446,7 @@ impl App {
             }
             _ if self.tree.filter_editing => {
                 self.tree.filter.insert_str(s);
-                self.refresh_tree();
+                self.filter_changed();
             }
             _ => {}
         }
@@ -486,7 +486,7 @@ impl App {
                 self.tree.filter.clear();
                 self.refresh_tree();
             }
-            InputOutcome::Changed => self.refresh_tree(),
+            InputOutcome::Changed => self.filter_changed(),
             InputOutcome::Moved => {}
             InputOutcome::Ignored => match key.code {
                 // Navigate matches without leaving the filter.
@@ -793,6 +793,12 @@ impl App {
         }
         self.current = Some(obj);
         self.focus = Focus::Center;
+    }
+
+    fn filter_changed(&mut self) {
+        if let Some(catalog) = self.session.as_ref().and_then(|s| s.catalog.as_ref()) {
+            self.tree.filter_changed(catalog);
+        }
     }
 
     fn refresh_tree(&mut self) {

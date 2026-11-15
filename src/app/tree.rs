@@ -57,6 +57,18 @@ impl TreeState {
     /// Rebuilds rows from the catalog, keeping the cursor on the same node
     /// when it still exists.
     pub fn rebuild(&mut self, catalog: &Catalog) {
+        self.rebuild_with(catalog, true);
+    }
+
+    /// To call when the filter text changed: the cursor jumps to the best
+    /// match instead of staying on the object matched by a shorter query.
+    pub fn filter_changed(&mut self, catalog: &Catalog) {
+        // With an empty filter, staying on the last match keeps the context.
+        let keep = self.filter.is_empty();
+        self.rebuild_with(catalog, keep);
+    }
+
+    fn rebuild_with(&mut self, catalog: &Catalog, keep_selection: bool) {
         if !self.initialised {
             self.initialised = true;
             if let Some(first) = catalog.schemas.iter().find(|s| !s.is_system) {
@@ -69,6 +81,7 @@ impl TreeState {
         // schema or group would hide the first match.
         let selected = self
             .selected()
+            .filter(|_| keep_selection)
             .filter(|r| self.filter.is_empty() || matches!(r.kind, RowKind::Object(_)))
             .map(|r| r.key.clone());
         self.rows = if self.filter.is_empty() {
@@ -502,6 +515,31 @@ mod tests {
         t.rebuild(&cat);
         assert_eq!(t.rows[2].label, "orders");
         assert_eq!(t.rows[3].label, "order_items");
+        assert_eq!(t.selected().unwrap().label, "orders");
+    }
+
+    #[test]
+    fn typing_the_filter_follows_the_best_match() {
+        let mut cat = catalog();
+        cat.schemas[0]
+            .objects
+            .insert(0, obj("order_items", ObjectKind::Table));
+        let mut t = TreeState {
+            viewport: 10,
+            ..Default::default()
+        };
+        t.rebuild(&cat);
+        // As typed in the UI: one character at a time.
+        for c in "orders".chars() {
+            let mut text = t.filter.text().to_string();
+            text.push(c);
+            t.filter = LineInput::with_text(text);
+            t.filter_changed(&cat);
+        }
+        assert_eq!(t.selected().unwrap().label, "orders");
+        // Clearing the filter keeps the cursor on the object.
+        t.filter.clear();
+        t.filter_changed(&cat);
         assert_eq!(t.selected().unwrap().label, "orders");
     }
 
