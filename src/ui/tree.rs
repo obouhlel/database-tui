@@ -13,10 +13,8 @@ use crate::app::{App, Focus};
 pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::Tree;
     let t = app.theme.clone();
-    let title = match &app.session {
-        Some(s) => format!(" {} — {} base(s) ", s.conn.name, s.databases.len()),
-        None => " Objets ".to_string(),
-    };
+    let open = app.servers.iter().filter(|s| s.is_connected()).count();
+    let title = format!(" Connexions ({}, {open} ouverte(s)) ", app.servers.len());
     let block = Block::bordered()
         .title(Span::styled(
             title,
@@ -67,6 +65,17 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         let mut spans = vec![Span::raw("  ".repeat(row.depth as usize))];
         let arrow = if row.expanded { "▾ " } else { "▸ " };
         let (icon, icon_color, label_style) = match row.kind {
+            RowKind::Connection => {
+                let color = app
+                    .server(&row.label)
+                    .and_then(|s| s.conn.parsed_color())
+                    .unwrap_or(t.accent);
+                (
+                    arrow,
+                    color,
+                    Style::new().fg(color).add_modifier(Modifier::BOLD),
+                )
+            }
             RowKind::Database => (
                 arrow,
                 t.accent,

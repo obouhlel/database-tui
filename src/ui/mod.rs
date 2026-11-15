@@ -34,9 +34,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     frame.render_widget(Block::new().style(app.theme.base()), area);
 
     let banner = app
-        .session
-        .as_ref()
-        .is_some_and(|s| s.conn.is_production() && app.screen == Screen::Main);
+        .current_server()
+        .is_some_and(|s| s.conn.is_production() && s.is_connected() && app.screen == Screen::Main);
     let [banner_area, body, status_area, hints_area] = Layout::vertical([
         Constraint::Length(u16::from(banner)),
         Constraint::Fill(1),
@@ -84,6 +83,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         }
         Some(Overlay::Login(form)) => popup::draw_login(frame, app, form, body),
         Some(Overlay::SaveServer(conn)) => popup::draw_save_server(frame, app, conn, body),
+        Some(Overlay::ConfirmDelete(name)) => popup::draw_confirm_delete(frame, app, name, body),
         // Drawn inside the Data tab.
         Some(Overlay::DataSearch { .. } | Overlay::FreeWhere(_)) => {}
         Some(Overlay::Command(_)) | None => {}
@@ -91,7 +91,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 }
 
 fn draw_prod_banner(frame: &mut Frame, app: &App, area: Rect) {
-    let Some(s) = &app.session else { return };
+    let Some(s) = app.current_server() else {
+        return;
+    };
     let t = &app.theme;
     let mut text = format!(" PRODUCTION  {}  {}", s.conn.name, s.conn.target());
     if s.conn.read_only {

@@ -13,7 +13,7 @@ use crate::app::discovery::PickerItem;
 
 pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
-    let n_conf = app.connections.len() as u16;
+    let n_conf = app.servers.len() as u16;
     let n_disc = app.discovered.len().max(1) as u16;
     let width = 96.min(area.width);
     // Warnings wrap: count the lines they will take at this width.
@@ -60,7 +60,7 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
             ..conf_area
         },
     );
-    if app.connections.is_empty() {
+    if app.servers.is_empty() {
         frame.render_widget(
             Line::styled(
                 "  aucune — ~/.config/pgtui/config.toml ou pgtui --url",
@@ -74,17 +74,17 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
         );
     }
     let name_w = app
-        .connections
+        .servers
         .iter()
-        .map(|(c, _)| c.name.chars().count())
+        .map(|s| s.conn.name.chars().count())
         .chain(app.discovered.iter().map(|s| s.label().chars().count()))
         .max()
         .unwrap_or(0)
         + 2;
     let target_w = app
-        .connections
+        .servers
         .iter()
-        .map(|(c, _)| c.target().chars().count())
+        .map(|s| s.conn.target().chars().count())
         .max()
         .unwrap_or(0);
 
@@ -119,7 +119,7 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
                 (conf_area.y + 1 + i as u16, Line::from(spans))
             }
             Some(PickerItem::Discovered(s)) => {
-                let j = i - app.connections.len();
+                let j = i - app.servers.len();
                 let spans = vec![
                     Span::raw("  "),
                     Span::styled(
@@ -144,7 +144,12 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
         let mut line = line;
         if i == app.picker_cursor {
             frame.buffer_mut().set_style(row, t.selection(true));
-            line = line.patch_style(Style::new().bg(t.selection_bg));
+            // Span colours win over the line style: patch each span so that
+            // the selected row reads well in every palette.
+            let sel = t.selection(true);
+            for span in &mut line.spans {
+                span.style = span.style.patch(sel);
+            }
         }
         frame.render_widget(line, row);
     }
@@ -189,22 +194,10 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
         );
     }
 
-    let footer_text = match &app.connecting {
-        Some((conn, since)) => Line::styled(
-            format!(
-                "{} Connexion à {} ({})… {:.1} s",
-                spinner(app.spinner),
-                conn.name,
-                conn.target(),
-                since.elapsed().as_secs_f64()
-            ),
-            Style::new().fg(t.info),
-        ),
-        None => Line::styled(
-            "Entrée pour se connecter · R relancer la détection",
-            t.dim(),
-        ),
-    };
+    let footer_text = Line::styled(
+        "Entrée : ouvrir dans l'arbre · R relancer la détection · Esc retour",
+        t.dim(),
+    );
     frame.render_widget(Paragraph::new(vec![Line::default(), footer_text]), footer);
 
     if !app.warnings.is_empty() {

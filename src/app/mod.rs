@@ -14,10 +14,11 @@ pub mod format;
 pub mod grid;
 pub mod input;
 pub mod schema_view;
+pub mod server;
+mod servers;
 pub mod tree;
 pub mod value;
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -25,16 +26,15 @@ use std::time::{Duration, Instant};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
 
 use crate::config::{Config, ConnectionConfig};
-use crate::db::catalog::{DatabaseInfo, ObjectRef};
+use crate::db::catalog::ObjectRef;
 use crate::db::schema::ObjectDetails;
 use crate::db::worker::{DbCommand, DbEvent};
-use crate::db::{ConnectRequest, ServerInfo};
 use crate::keymap::{Action, Context, KeyChord, KeyResolver, Keymap, Resolved};
 use crate::ui::theme::Theme;
 use data_view::DataView;
 use input::{InputOutcome, LineInput};
 use schema_view::{SchemaView, Section};
-use tree::{DatabaseEntry, NodeKey, RowKind, TreeState};
+use tree::{NodeKey, RowKind, TreeState};
 
 #[derive(Debug)]
 pub enum Msg {
@@ -57,6 +57,8 @@ pub enum Effect {
     Copy(String),
     /// Append a connection to `config.toml`.
     SaveConnection(Box<ConnectionConfig>),
+    /// Remove a connection from `config.toml`.
+    DeleteConnection(String),
 }
 
 impl From<DbCommand> for Effect {
@@ -198,6 +200,8 @@ pub enum Overlay {
     },
     /// User / password / database for a discovered server.
     Login(Box<discovery::LoginForm>),
+    /// `dd` on a connection: confirm its removal.
+    ConfirmDelete(String),
     /// Offer to save a discovered server in `config.toml`.
     SaveServer(Box<ConnectionConfig>),
 }
@@ -213,18 +217,6 @@ impl Overlay {
                 | Overlay::RowDetail { .. }
         )
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct Session {
-    pub conn: ConnectionConfig,
-    pub info: ServerInfo,
-    /// Every database of the server, with its catalog once loaded.
-    pub databases: Vec<DatabaseEntry>,
-    /// Set when the server connection dropped.
-    pub lost: Option<String>,
-    /// Schema tab cache, cleared when the catalog is reloaded.
-    pub details: HashMap<ObjectRef, DetailsState>,
 }
 
 /// An in-flight background operation, for the spinner.
@@ -258,8 +250,8 @@ pub struct App {
     resolver: KeyResolver,
 
     pub screen: Screen,
-    /// Connections listed in the picker (config + `DATABASE_URL`).
-    pub connections: Vec<(ConnectionConfig, Option<String>)>,
+    /// Connections of the tree (config, `--url`, `DATABASE_URL`, added).
+    pub servers: Vec<server::Server>,
     pub picker_cursor: usize,
     /// PostgreSQL servers found on the local machine.
     pub discovered: Vec<crate::db::discover::DiscoveredServer>,
@@ -271,8 +263,6 @@ pub struct App {
     /// Config / keymap warnings shown in the picker.
     pub warnings: Vec<String>,
 
-    pub connecting: Option<(ConnectionConfig, Instant)>,
-    pub session: Option<Session>,
     pub tree: TreeState,
     pub focus: Focus,
     pub tab: Tab,
@@ -305,26 +295,33 @@ impl App {
         extra: Vec<(ConnectionConfig, Option<String>)>,
         start: Start,
     ) -> Self {
-        let mut connections = extra;
-        connections.extend(config.connections.iter().cloned().map(|c| (c, None)));
-        let picker_cursor = config
-            .general
-            .default_connection
-            .as_ref()
-            .and_then(|d| connections.iter().position(|(c, _)| &c.name == d))
-            .unwrap_or(0);
+        let mut servers: Vec<server::Server> = extra
+            .into_iter()
+            .map(|(c, pw)| server::Server::new(c, pw, false))
+            .collect();
+        servers.extend(
+            config
+                .connections
+                .iter()
+                .cloned()
+                .map(|c| server::Server::new(c, None, true)),
+        );
+        let default = config.general.default_connection.clone();
+        let mut tree = TreeState::default();
+        tree.rebuild(&servers);
+        if let Some(d) = &default {
+            tree.select(&NodeKey::Connection(d.clone()));
+        }
         Self {
             config,
             keymap,
             theme,
             resolver: KeyResolver::default(),
-            screen: Screen::Picker,
-            connections,
-            picker_cursor,
+            screen: Screen::Main,
+            servers,
+            picker_cursor: 0,
             warnings,
-            connecting: None,
-            session: None,
-            tree: TreeState::default(),
+            tree,
             focus: Focus::Tree,
             tab: Tab::Schema,
             current: None,
@@ -349,10 +346,17 @@ impl App {
 
     /// Commands to run at startup.
     pub fn init(&mut self) -> Vec<Effect> {
-        match self.start.take() {
-            Some(Start::Connect { conn, password }) => self.start_connect(*conn, password, true),
-            _ => self.discover(),
+        if let Some(Start::Connect { conn, password }) = self.start.take() {
+            if self.server(&conn.name).is_none() {
+                self.servers
+                    .insert(0, server::Server::new(*conn.clone(), password, false));
+            }
+            self.open_connection(&conn.name);
         }
+        // Servers of this machine are listed on the connections page.
+        let mut effects = self.discover();
+        effects.extend(self.sync_connections());
+        effects
     }
 
     /// Returns whether a redraw is needed, and clears the flag.
@@ -397,6 +401,7 @@ impl App {
 
     pub fn update(&mut self, msg: Msg) -> Vec<Effect> {
         let mut effects = self.handle(msg);
+        effects.extend(self.sync_connections());
         effects.extend(self.sync_catalogs());
         effects.extend(self.sync_details());
         effects.extend(self.sync_data());
@@ -434,22 +439,30 @@ impl App {
         }
     }
 
-    /// Requests the details of the object shown in the Schema tab when they
-    /// are not cached, and feeds cached details to the Schema view.
+    /// Requests the details of the object shown in the Schema / Data tab
+    /// when they are not cached, and feeds cached details to the Schema view.
     fn sync_details(&mut self) -> Vec<Effect> {
         let Some(obj) = self.current.clone() else {
             return Vec::new();
         };
-        let Some(session) = &mut self.session else {
+        let wanted = matches!(self.tab, Tab::Schema | Tab::Data);
+        let Some(s) = self
+            .servers
+            .iter_mut()
+            .find(|s| s.conn.name == obj.connection)
+        else {
             return Vec::new();
         };
-        match session.details.get(&obj) {
+        let catalog_loaded = s
+            .database(&obj.database)
+            .is_some_and(|d| d.catalog.is_some());
+        match s.details.get(&obj) {
             Some(DetailsState::Loaded(d)) => {
                 let shown = self
                     .schema
                     .details
                     .as_ref()
-                    .is_some_and(|s| Arc::ptr_eq(s, d));
+                    .is_some_and(|x| Arc::ptr_eq(x, d));
                 if !shown {
                     self.schema.show(d.clone());
                     self.dirty = true;
@@ -457,14 +470,8 @@ impl App {
                 Vec::new()
             }
             Some(_) => Vec::new(),
-            None if matches!(self.tab, Tab::Schema | Tab::Data)
-                && session.lost.is_none()
-                && session
-                    .databases
-                    .iter()
-                    .any(|d| d.name() == obj.database && d.catalog.is_some()) =>
-            {
-                session.details.insert(obj.clone(), DetailsState::Loading);
+            None if wanted && s.is_connected() && catalog_loaded => {
+                s.details.insert(obj.clone(), DetailsState::Loading);
                 if self.schema.object.as_ref() != Some(&obj) {
                     self.schema.clear();
                 }
@@ -474,67 +481,10 @@ impl App {
         }
     }
 
-    /// Loads the catalog of every expanded database that has none yet.
-    fn sync_catalogs(&mut self) -> Vec<Effect> {
-        let Some(s) = &mut self.session else {
-            return Vec::new();
-        };
-        if s.lost.is_some() {
-            return Vec::new();
-        }
-        let include_system = self.config.general.show_system_schemas;
-        let mut effects = Vec::new();
-        for db in &mut s.databases {
-            let wanted = self
-                .tree
-                .is_expanded(&NodeKey::Database(db.name().to_string()));
-            if wanted
-                && db.catalog.is_none()
-                && !db.loading
-                && db.error.is_none()
-                && db.info.can_connect
-            {
-                db.loading = true;
-                effects.push(
-                    DbCommand::LoadCatalog {
-                        database: db.name().to_string(),
-                        include_system,
-                    }
-                    .into(),
-                );
-            }
-        }
-        if !effects.is_empty() {
-            self.tree.rebuild(&s.databases);
-            self.dirty = true;
-        }
-        effects
-    }
-
-    /// Database of the current object, else of the tree selection.
-    pub fn current_database(&self) -> Option<&str> {
-        self.current
-            .as_ref()
-            .map(|o| o.database.as_str())
-            .or_else(|| self.tree.selected_database())
-            .or_else(|| self.session.as_ref().map(|s| s.info.database.as_str()))
-    }
-
-    /// Catalog of a database, if loaded.
-    pub fn catalog(&self, database: &str) -> Option<&crate::db::catalog::Catalog> {
-        self.session
-            .as_ref()?
-            .databases
-            .iter()
-            .find(|d| d.name() == database)?
-            .catalog
-            .as_ref()
-    }
-
     /// Details state of the current object, for the renderer.
     pub fn current_details(&self) -> Option<&DetailsState> {
         let obj = self.current.as_ref()?;
-        self.session.as_ref()?.details.get(obj)
+        self.server(&obj.connection)?.details.get(obj)
     }
 
     pub fn notify(&mut self, level: Level, text: impl Into<String>) {
@@ -562,11 +512,11 @@ impl App {
         if let Some(action) = self.resolver.check_timeout(now) {
             cmds = self.dispatch(action);
         }
-        let loading_db = self
-            .session
-            .as_ref()
-            .is_some_and(|s| s.databases.iter().any(|d| d.loading));
-        if self.busy.is_some() || self.connecting.is_some() || self.discovering || loading_db {
+        let loading = self.servers.iter().any(|s| {
+            matches!(s.state, server::ConnState::Connecting(_))
+                || s.databases.iter().any(|d| d.loading)
+        });
+        if self.busy.is_some() || self.discovering || loading {
             self.spinner = self.spinner.wrapping_add(1);
             self.dirty = true;
         }
@@ -642,6 +592,7 @@ impl App {
         match &self.overlay {
             Some(Overlay::Login(_)) => return self.on_login_key(key),
             Some(Overlay::SaveServer(_)) => return self.on_save_server_key(key),
+            Some(Overlay::ConfirmDelete(_)) => return self.on_confirm_delete_key(key),
             _ => {}
         }
         if self.overlay.as_ref().is_some_and(Overlay::is_data) {
@@ -672,7 +623,8 @@ impl App {
             | Overlay::CopyFormat { .. }
             | Overlay::RowDetail { .. }
             | Overlay::Login(_)
-            | Overlay::SaveServer(_) => Vec::new(),
+            | Overlay::SaveServer(_)
+            | Overlay::ConfirmDelete(_) => Vec::new(),
             Overlay::Error { .. } => {
                 if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) {
                     self.overlay = None;
@@ -698,13 +650,12 @@ impl App {
             Overlay::Password { conn, input, .. } => match input.handle_key(&key) {
                 InputOutcome::Submit => {
                     let password = input.text().to_string();
-                    let conn = (**conn).clone();
+                    let name = conn.name.clone();
                     self.overlay = None;
-                    self.start_connect(conn, Some(password), false)
+                    self.connect_server(&name, Some(password), false)
                 }
                 InputOutcome::Cancel => {
                     self.overlay = None;
-                    self.connecting = None;
                     Vec::new()
                 }
                 _ => Vec::new(),
@@ -717,7 +668,13 @@ impl App {
     fn dispatch(&mut self, action: Action) -> Vec<Effect> {
         use Action::*;
         match action {
+            // On the connections page, `q` / Esc go back to the tree.
+            Quit | Cancel if self.screen == Screen::Picker => self.screen = Screen::Main,
             Quit => self.should_quit = true,
+            ConnectionsPage => {
+                self.screen = Screen::Picker;
+                return self.discover();
+            }
             Help => self.overlay = Some(Overlay::Help { scroll: 0 }),
             CommandPalette => self.overlay = Some(Overlay::Command(LineInput::default())),
             Interrupt => {
@@ -748,7 +705,7 @@ impl App {
             TabData => self.tab = Tab::Data,
             TabSql => self.tab = Tab::Sql,
             ReloadCatalog => return self.reload_catalog(),
-            _ if self.focus == Focus::Tree => self.dispatch_tree(action),
+            _ if self.focus == Focus::Tree => return self.dispatch_tree(action),
             _ if self.tab == Tab::Schema => return self.dispatch_schema(action),
             _ if self.tab == Tab::Data => return self.dispatch_data(action),
             _ => {}
@@ -786,8 +743,10 @@ impl App {
             }
             Copy => return self.copy_schema(),
             Refresh => {
-                if let (Some(obj), Some(s)) = (&self.current, &mut self.session) {
-                    s.details.remove(obj);
+                if let Some(obj) = self.current.clone()
+                    && let Some(s) = self.server_mut(&obj.connection)
+                {
+                    s.details.remove(&obj);
                 }
             }
             _ => self.navigate_schema(action),
@@ -868,12 +827,10 @@ impl App {
 
     /// Opens `obj` in the center panel and reveals it in the tree.
     fn go_to(&mut self, obj: ObjectRef) {
-        if let Some(s) = &self.session {
-            if !self.tree.filter.is_empty() {
-                self.tree.filter.clear();
-            }
-            self.tree.reveal(&s.databases, &obj);
+        if !self.tree.filter.is_empty() {
+            self.tree.filter.clear();
         }
+        self.tree.reveal(&self.servers, &obj);
         self.current = Some(obj);
     }
 
@@ -894,11 +851,13 @@ impl App {
             Action::Bottom => n - 1,
             Action::PageUp | Action::HalfPageUp => cur.saturating_sub(page),
             Action::PageDown | Action::HalfPageDown => (cur + page).min(n - 1),
-            Action::Connect if self.connecting.is_none() => {
+            Action::Connect => {
                 match self.picker_item(cur) {
-                    Some(discovery::PickerItem::Configured(_)) => {
-                        let (conn, password) = self.connections[cur].clone();
-                        return self.start_connect(conn, password, true);
+                    Some(discovery::PickerItem::Configured(conn)) => {
+                        let name = conn.name.clone();
+                        self.screen = Screen::Main;
+                        self.focus = Focus::Tree;
+                        self.open_connection(&name);
                     }
                     Some(discovery::PickerItem::Discovered(server)) => {
                         let server = server.clone();
@@ -913,10 +872,8 @@ impl App {
         Vec::new()
     }
 
-    fn dispatch_tree(&mut self, action: Action) {
-        let Some(catalog) = self.session.as_ref().map(|s| s.databases.as_slice()) else {
-            return;
-        };
+    fn dispatch_tree(&mut self, action: Action) -> Vec<Effect> {
+        let servers = &self.servers;
         let tree = &mut self.tree;
         match action {
             Action::Up => tree.move_by(-1),
@@ -927,33 +884,67 @@ impl App {
             Action::HalfPageUp => tree.move_by(-tree.half_page()),
             Action::PageDown => tree.move_by(tree.page()),
             Action::PageUp => tree.move_by(-tree.page()),
-            Action::Expand => tree.expand(catalog),
-            Action::Collapse => tree.collapse(catalog),
-            Action::CollapseAll => tree.collapse_all(catalog),
+            Action::Collapse => tree.collapse(servers),
+            Action::CollapseAll => tree.collapse_all(servers),
             Action::Filter => tree.filter_editing = true,
             Action::ClearFilter => {
                 if !tree.filter.is_empty() {
                     tree.filter.clear();
-                    tree.rebuild(catalog);
+                    tree.rebuild(servers);
                 }
             }
-            Action::Open => match tree.selected().map(|r| r.kind) {
-                Some(RowKind::Object(_)) => {
-                    let obj = tree.selected_object().cloned();
-                    if let Some(obj) = obj {
-                        // Clearing the filter keeps the object in context.
-                        if !tree.filter.is_empty() {
-                            tree.filter.clear();
-                            tree.reveal(catalog, &obj);
+            Action::Expand | Action::Open => {
+                let Some(row) = tree.selected().cloned() else {
+                    return Vec::new();
+                };
+                match row.kind {
+                    RowKind::Object(_) if action == Action::Open => {
+                        if let NodeKey::Object(obj) = row.key {
+                            // Clearing the filter keeps the object in context.
+                            if !tree.filter.is_empty() {
+                                tree.filter.clear();
+                                tree.reveal(servers, &obj);
+                            }
+                            self.open_object(obj);
                         }
-                        self.open_object(obj);
                     }
+                    RowKind::Object(_) => {}
+                    RowKind::Connection => {
+                        // A failed / lost connection is retried.
+                        let name = row.label.clone();
+                        let retry = self.server(&name).is_some_and(|s| {
+                            matches!(
+                                s.state,
+                                server::ConnState::Failed(_) | server::ConnState::Lost(_)
+                            )
+                        });
+                        if retry || !row.expanded {
+                            self.open_connection(&name);
+                        } else if action == Action::Open {
+                            self.tree.toggle(&self.servers);
+                        } else {
+                            self.tree.expand(&self.servers);
+                        }
+                    }
+                    _ if action == Action::Open => tree.toggle(servers),
+                    _ => tree.expand(servers),
                 }
-                Some(_) => tree.toggle(catalog),
-                None => {}
+            }
+            Action::Disconnect => {
+                if let Some(name) = tree.selected_connection().map(str::to_string) {
+                    return self.disconnect(&name);
+                }
+            }
+            Action::DeleteConnection => match tree.selected().map(|r| (r.kind, r.label.clone())) {
+                Some((RowKind::Connection, name)) => self.ask_delete(&name),
+                _ => self.notify(
+                    Level::Info,
+                    "Placez le curseur sur une connexion pour la supprimer",
+                ),
             },
             _ => {}
         }
+        Vec::new()
     }
 
     fn open_object(&mut self, obj: ObjectRef) {
@@ -970,15 +961,7 @@ impl App {
     }
 
     fn filter_changed(&mut self) {
-        if let Some(s) = &self.session {
-            self.tree.filter_changed(&s.databases);
-        }
-    }
-
-    fn refresh_tree(&mut self) {
-        if let Some(s) = &self.session {
-            self.tree.rebuild(&s.databases);
-        }
+        self.tree.filter_changed(&self.servers);
     }
 
     // ------------------------------------------------------------- commands
@@ -990,42 +973,33 @@ impl App {
             return Vec::new();
         };
         let arg = parts.next();
+        let current = self.current_server().map(|s| s.name().to_string());
         match cmd {
             "q" | "quit" | "q!" | "quit!" | "qa" | "qa!" => self.should_quit = true,
             "h" | "help" => self.overlay = Some(Overlay::Help { scroll: 0 }),
             "reload" | "refresh" => return self.reload_catalog(),
-            "reconnect" => {
-                if let Some(s) = &self.session {
-                    let conn = s.conn.clone();
-                    return self.start_connect(conn, None, true);
-                }
-                self.notify(Level::Warning, "Aucune session à reconnecter");
-            }
-            "connections" | "disconnect" => {
-                self.session = None;
-                self.current = None;
-                self.schema = SchemaView::default();
-                self.data = DataView::default();
-                self.back_stack.clear();
-                self.tree = TreeState::default();
+            "connections" | "conn" => {
                 self.screen = Screen::Picker;
-                let mut effects = vec![DbCommand::Disconnect.into()];
-                effects.extend(self.discover());
-                return effects;
+                return self.discover();
             }
+            "reconnect" => match current {
+                Some(name) => return self.connect_server(&name, None, true),
+                None => self.notify(Level::Warning, "Aucune connexion sélectionnée"),
+            },
+            "disconnect" => match current {
+                Some(name) => return self.disconnect(&name),
+                None => self.notify(Level::Warning, "Aucune connexion sélectionnée"),
+            },
             "connect" | "c" => {
                 let Some(name) = arg else {
                     self.notify(Level::Warning, "Usage : :connect <nom>");
                     return Vec::new();
                 };
-                match self
-                    .connections
-                    .iter()
-                    .find(|(c, _)| c.name == name)
-                    .cloned()
-                {
-                    Some((conn, pw)) => return self.start_connect(conn, pw, true),
-                    None => self.notify(Level::Error, format!("Connexion inconnue : {name}")),
+                if self.server(name).is_some() {
+                    self.screen = Screen::Main;
+                    self.open_connection(name);
+                } else {
+                    self.notify(Level::Error, format!("Connexion inconnue : {name}"));
                 }
             }
             "schema" => self.tab = Tab::Schema,
@@ -1040,232 +1014,19 @@ impl App {
         &[
             ("q, quit", "Quitter"),
             ("help", "Aide"),
-            ("reload", "Recharger le catalogue"),
-            ("connect <nom>", "Se connecter à une autre connexion"),
-            ("connections", "Revenir au sélecteur (déconnecte)"),
-            ("reconnect", "Rouvrir la session courante"),
+            ("reload", "Recharger les catalogues"),
+            ("connections", "Page des connexions (serveurs détectés)"),
+            ("connect <nom>", "Ouvrir une connexion dans l'arbre"),
+            ("reconnect", "Rouvrir la connexion courante"),
+            ("disconnect", "Fermer la connexion courante"),
             ("schema | data | sql", "Changer d'onglet"),
         ]
     }
 
     // ------------------------------------------------------------------- db
 
-    fn start_connect(
-        &mut self,
-        conn: ConnectionConfig,
-        password: Option<String>,
-        resolve: bool,
-    ) -> Vec<Effect> {
-        let statement_timeout_secs = conn.statement_timeout(&self.config.general);
-        self.connecting = Some((conn.clone(), Instant::now()));
-        self.busy = Some(Busy {
-            label: format!("Connexion à {}…", conn.name),
-            since: Instant::now(),
-        });
-        vec![
-            DbCommand::Connect {
-                request: Box::new(ConnectRequest {
-                    conn,
-                    password,
-                    statement_timeout_secs,
-                }),
-                resolve_password: resolve,
-            }
-            .into(),
-        ]
-    }
-
-    /// Reloads every loaded catalog (and retries failed ones).
-    fn reload_catalog(&mut self) -> Vec<Effect> {
-        let Some(s) = &mut self.session else {
-            return Vec::new();
-        };
-        if s.lost.is_some() {
-            self.notify(Level::Warning, "Connexion perdue — :reconnect");
-            return Vec::new();
-        }
-        let include_system = self.config.general.show_system_schemas;
-        let mut effects = Vec::new();
-        for db in &mut s.databases {
-            if (db.catalog.is_some() || db.error.is_some()) && !db.loading {
-                db.loading = true;
-                db.error = None;
-                effects.push(
-                    DbCommand::LoadCatalog {
-                        database: db.name().to_string(),
-                        include_system,
-                    }
-                    .into(),
-                );
-            }
-        }
-        self.tree.rebuild(&s.databases);
-        effects
-    }
-
     fn on_db(&mut self, ev: DbEvent) -> Vec<Effect> {
         match ev {
-            DbEvent::Connected {
-                info,
-                databases,
-                elapsed,
-            } => {
-                let Some((conn, _)) = self.connecting.take() else {
-                    return Vec::new();
-                };
-                self.busy = None;
-                self.last_op = Some(LastOp {
-                    label: "connexion".into(),
-                    elapsed,
-                });
-                let previous = self.session.take().filter(|s| s.conn.name == conn.name);
-                if previous.is_none() {
-                    self.tree = TreeState::default();
-                    self.current = None;
-                    self.schema = SchemaView::default();
-                    self.data = DataView::default();
-                    self.back_stack.clear();
-                    self.focus = Focus::Tree;
-                }
-                // The connected database first, then the others by name.
-                let mut infos = databases;
-                if !infos.iter().any(|d| d.name == info.database) {
-                    infos.push(DatabaseInfo {
-                        name: info.database.clone(),
-                        comment: None,
-                        size_bytes: None,
-                        can_connect: true,
-                    });
-                }
-                infos.sort_by_key(|d| (d.name != info.database, d.name.clone()));
-                let databases: Vec<DatabaseEntry> = infos
-                    .into_iter()
-                    .map(|i| {
-                        // A reconnection keeps the catalogs already loaded.
-                        let old = previous
-                            .as_ref()
-                            .and_then(|p| p.databases.iter().find(|d| d.name() == i.name));
-                        DatabaseEntry {
-                            catalog: old.and_then(|d| d.catalog.clone()),
-                            ..DatabaseEntry::new(i)
-                        }
-                    })
-                    .collect();
-                self.notify(
-                    Level::Success,
-                    format!(
-                        "Connecté à {} (PostgreSQL {}{}) — {} base(s)",
-                        conn.name,
-                        info.version,
-                        if info.tls { ", TLS" } else { "" },
-                        databases.len()
-                    ),
-                );
-                self.tree.expand_database(&info.database);
-                self.tree.rebuild(&databases);
-                self.login_succeeded(&conn);
-                self.session = Some(Session {
-                    conn,
-                    info,
-                    databases,
-                    lost: None,
-                    details: HashMap::new(),
-                });
-                self.screen = Screen::Main;
-                // `sync_catalogs` loads the expanded database.
-                Vec::new()
-            }
-            DbEvent::ConnectFailed {
-                error,
-                password_required,
-            } => {
-                self.busy = None;
-                let Some((conn, _)) = self.connecting.take() else {
-                    return Vec::new();
-                };
-                if self.login_failed(error.clone()) {
-                    return Vec::new();
-                }
-                if password_required {
-                    self.overlay = Some(Overlay::Password {
-                        conn: Box::new(conn),
-                        input: LineInput::default(),
-                        error: Some(error),
-                    });
-                } else {
-                    tracing::warn!(connection = %conn.name, "connection failed: {error}");
-                    self.overlay = Some(Overlay::Error {
-                        title: format!("Connexion à {} impossible", conn.name),
-                        message: error,
-                    });
-                }
-                Vec::new()
-            }
-            DbEvent::CatalogLoaded { catalog, elapsed } => {
-                let count = catalog.object_count();
-                self.last_op = Some(LastOp {
-                    label: "catalogue".into(),
-                    elapsed,
-                });
-                let Some(s) = &mut self.session else {
-                    return Vec::new();
-                };
-                let db_name = catalog.database.clone();
-                // Drop the current object if it no longer exists.
-                if let Some(cur) = self.current.as_ref().filter(|c| c.database == db_name) {
-                    let exists = catalog.schemas.iter().any(|sc| {
-                        sc.name == cur.schema
-                            && sc
-                                .objects
-                                .iter()
-                                .any(|o| ObjectRef::new(&db_name, &sc.name, o) == *cur)
-                    });
-                    if !exists {
-                        self.current = None;
-                        self.schema = SchemaView::default();
-                        self.data = DataView::default();
-                    }
-                }
-                s.details.retain(|o, _| o.database != db_name);
-                if let Some(db) = s.databases.iter_mut().find(|d| d.name() == db_name) {
-                    db.catalog = Some(catalog);
-                    db.loading = false;
-                    db.error = None;
-                }
-                self.tree.rebuild(&s.databases);
-                tracing::info!(database = %db_name, objects = count, ?elapsed, "catalog loaded");
-                Vec::new()
-            }
-            DbEvent::CatalogFailed { database, error } => {
-                if let Some(s) = &mut self.session {
-                    if let Some(db) = s.databases.iter_mut().find(|d| d.name() == database) {
-                        db.loading = false;
-                        db.error = Some(error.clone());
-                    }
-                    self.tree.rebuild(&s.databases);
-                }
-                self.notify(Level::Error, format!("Base {database} : {error}"));
-                Vec::new()
-            }
-            DbEvent::DetailsLoaded { details, elapsed } => {
-                self.last_op = Some(LastOp {
-                    label: "détails".into(),
-                    elapsed,
-                });
-                if let Some(s) = &mut self.session {
-                    s.details.insert(
-                        details.object.clone(),
-                        DetailsState::Loaded(Arc::new(*details)),
-                    );
-                }
-                Vec::new()
-            }
-            DbEvent::DetailsFailed { object, error } => {
-                if let Some(s) = &mut self.session {
-                    s.details.insert(object, DetailsState::Failed(error));
-                }
-                Vec::new()
-            }
             ev @ (DbEvent::RowsLoaded { .. }
             | DbEvent::RowsFailed { .. }
             | DbEvent::RowsCounted { .. }
@@ -1273,24 +1034,11 @@ impl App {
                 self.on_data_event(ev);
                 Vec::new()
             }
-            DbEvent::Progress(label) => {
-                if let Some(b) = &mut self.busy {
-                    b.label = label;
-                }
-                Vec::new()
-            }
             DbEvent::Discovered(servers) => {
                 self.on_discovered(servers);
                 Vec::new()
             }
-            DbEvent::ConnectionLost(e) => {
-                if let Some(s) = &mut self.session {
-                    s.lost = Some(e.clone());
-                }
-                self.busy = None;
-                self.notify(Level::Error, format!("Connexion perdue : {e} — :reconnect"));
-                Vec::new()
-            }
+            ev => self.on_server_event(ev),
         }
     }
 

@@ -1,13 +1,13 @@
 //! The DB worker: a tokio task that owns the backends. The UI sends
 //! [`DbCommand`]s and receives [`DbEvent`]s; it never awaits a query itself.
 //!
-//! A session targets a server: the database chosen at connection time is
-//! opened first, the others lazily (when the tree expands them or an object
-//! of theirs is opened), with the same credentials.
+//! Several connections (servers) can be open at once, each identified by its
+//! name. For each one, the database chosen at connection time is opened
+//! first, the others lazily (when the tree expands them or an object of
+//! theirs is opened), with the same credentials and through the same tunnel.
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -22,13 +22,15 @@ use crate::config::password;
 
 #[derive(Debug)]
 pub enum DbCommand {
-    /// Opens a session, replacing the current one. With `resolve_password`,
-    /// the configured password sources are tried when `request.password` is empty.
+    /// Opens the connection `request.conn.name`, replacing it if already
+    /// open. With `resolve_password`, the configured password sources are
+    /// tried when `request.password` is empty.
     Connect {
         request: Box<ConnectRequest>,
         resolve_password: bool,
     },
     LoadCatalog {
+        connection: String,
         database: String,
         include_system: bool,
     },
@@ -43,34 +45,41 @@ pub enum DbCommand {
         request: Box<DataRequest>,
         bound: u64,
     },
-    /// Cancel the query running on the session connection of `database`.
+    /// Cancel the query running on the session connection of a database.
     Cancel {
+        connection: String,
         database: String,
     },
     /// Probe the local machine for PostgreSQL servers.
     Discover {
         ports: Vec<u16>,
     },
-    Disconnect,
+    Disconnect {
+        connection: String,
+    },
 }
 
 #[derive(Debug)]
 pub enum DbEvent {
     Connected {
+        connection: String,
         info: ServerInfo,
         /// Databases of the server (the connected one included).
         databases: Vec<DatabaseInfo>,
         elapsed: Duration,
     },
     ConnectFailed {
+        connection: String,
         error: String,
         password_required: bool,
     },
+    /// `catalog.connection` names the connection.
     CatalogLoaded {
         catalog: Catalog,
         elapsed: Duration,
     },
     CatalogFailed {
+        connection: String,
         database: String,
         error: String,
     },
@@ -102,8 +111,14 @@ pub enum DbEvent {
     },
     Discovered(Vec<DiscoveredServer>),
     /// A step of a long operation (opening a tunnel, connecting).
-    Progress(String),
-    ConnectionLost(String),
+    Progress {
+        connection: String,
+        message: String,
+    },
+    ConnectionLost {
+        connection: String,
+        message: String,
+    },
 }
 
 /// Spawns the worker on the current tokio runtime.
@@ -116,7 +131,7 @@ pub fn spawn(events: UnboundedSender<DbEvent>) -> UnboundedSender<DbCommand> {
 /// A backend opened at most once, even when several requests race for it.
 type LazyBackend = Arc<OnceCell<Arc<dyn Backend>>>;
 
-/// One backend per database of the connected server, opened on demand.
+/// One backend per database of a server, opened on demand.
 struct Pool {
     template: ConnectRequest,
     on_lost: super::postgres::OnConnectionLost,
@@ -137,7 +152,7 @@ impl Pool {
         cell.get_or_try_init(|| async {
             let mut req = self.template.clone();
             req.conn.database = Some(database.to_string());
-            tracing::info!(database, "opening database");
+            tracing::info!(connection = %req.conn.name, database, "opening database");
             super::connect(&req, self.on_lost.clone()).await
         })
         .await
@@ -145,11 +160,35 @@ impl Pool {
     }
 }
 
+/// Open connections. The generation is bumped on every (dis)connection so
+/// that late results and notifications of a replaced session are ignored.
+#[derive(Default)]
+struct Pools {
+    generation: HashMap<String, u64>,
+    open: HashMap<String, Arc<Pool>>,
+}
+
+type SharedPools = Arc<std::sync::Mutex<Pools>>;
+
+impl Pools {
+    fn bump(&mut self, connection: &str) -> u64 {
+        self.open.remove(connection);
+        let g = self.generation.entry(connection.to_string()).or_default();
+        *g += 1;
+        *g
+    }
+
+    fn is_current(&self, connection: &str, generation: u64) -> bool {
+        self.generation.get(connection) == Some(&generation)
+    }
+}
+
+fn pool(pools: &SharedPools, connection: &str) -> Option<Arc<Pool>> {
+    pools.lock().ok()?.open.get(connection).cloned()
+}
+
 async fn run(mut commands: UnboundedReceiver<DbCommand>, events: UnboundedSender<DbEvent>) {
-    let mut pool: Option<Arc<Pool>> = None;
-    // Bumped on every (dis)connection so that late notifications from an old
-    // session are ignored.
-    let generation = Arc::new(AtomicU64::new(0));
+    let pools: SharedPools = Arc::default();
 
     while let Some(cmd) = commands.recv().await {
         tracing::debug!(?cmd, "db command");
@@ -158,119 +197,30 @@ async fn run(mut commands: UnboundedReceiver<DbCommand>, events: UnboundedSender
                 request,
                 resolve_password,
             } => {
-                pool = None;
-                let current = generation.fetch_add(1, Ordering::SeqCst) + 1;
-                let started = Instant::now();
-                let mut request = *request;
-                if resolve_password && request.password.is_none() {
-                    match password::resolve(&request.conn).await {
-                        Ok(Some((pw, source))) => {
-                            tracing::info!(connection = %request.conn.name, ?source, "password resolved");
-                            request.password = Some(pw);
-                        }
-                        Ok(None) => {}
-                        Err(e) => {
-                            send(
-                                &events,
-                                DbEvent::ConnectFailed {
-                                    error: format!("{e:#}"),
-                                    password_required: false,
-                                },
-                            );
-                            continue;
-                        }
-                    }
-                }
-                let on_lost = {
-                    let events = events.clone();
-                    let generation = generation.clone();
-                    Arc::new(move |msg: String| {
-                        if generation.load(Ordering::SeqCst) == current {
-                            send(&events, DbEvent::ConnectionLost(msg));
-                        }
-                    })
+                let connection = request.conn.name.clone();
+                let Ok(generation) = pools.lock().map(|mut p| p.bump(&connection)) else {
+                    continue;
                 };
-                let primary = request.conn.effective_database();
-                let mut template = request.clone();
-                let mut tunnel = None;
-                if let Some(cmd) = request.conn.tunnel_cmd.clone() {
-                    send(&events, DbEvent::Progress("Ouverture du tunnel…".into()));
-                    let timeout =
-                        Duration::from_secs(request.conn.tunnel_timeout_secs.unwrap_or(15));
-                    match super::tunnel::open(&cmd, timeout).await {
-                        Ok(t) => {
-                            template.conn.host = "127.0.0.1".into();
-                            template.conn.port = t.port;
-                            tunnel = Some(t);
-                            send(
-                                &events,
-                                DbEvent::Progress("Tunnel ouvert, connexion…".into()),
-                            );
-                        }
-                        Err(e) => {
-                            send(
-                                &events,
-                                DbEvent::ConnectFailed {
-                                    error: format!("{e:#}"),
-                                    password_required: false,
-                                },
-                            );
-                            continue;
-                        }
-                    }
-                }
-                let has_tunnel = tunnel.is_some();
-                let p = Arc::new(Pool {
-                    template,
-                    on_lost: on_lost.clone(),
-                    backends: Mutex::default(),
-                    tunnel: tunnel.map(std::sync::Mutex::new),
-                });
-                if has_tunnel {
-                    watch_tunnel(Arc::downgrade(&p), on_lost);
-                }
-                match p.get(&primary).await {
-                    Ok(b) => {
-                        let info = b.info().clone();
-                        let databases = match b.list_databases().await {
-                            Ok(d) => d,
-                            Err(e) => {
-                                tracing::warn!("cannot list databases: {e:#}");
-                                Vec::new()
-                            }
-                        };
-                        pool = Some(p);
-                        send(
-                            &events,
-                            DbEvent::Connected {
-                                info,
-                                databases,
-                                elapsed: started.elapsed(),
-                            },
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(connection = %request.conn.name, "connect failed: {e}");
-                        send(
-                            &events,
-                            DbEvent::ConnectFailed {
-                                password_required: matches!(e, ConnectError::PasswordRequired(_)),
-                                error: e.to_string(),
-                            },
-                        );
-                    }
-                }
+                tokio::spawn(connect(
+                    *request,
+                    resolve_password,
+                    generation,
+                    pools.clone(),
+                    events.clone(),
+                ));
             }
             DbCommand::LoadCatalog {
+                connection,
                 database,
                 include_system,
             } => {
-                let Some(p) = pool.clone() else {
+                let Some(p) = pool(&pools, &connection) else {
                     send(
                         &events,
                         DbEvent::CatalogFailed {
+                            connection,
                             database,
-                            error: "not connected".into(),
+                            error: "non connecté".into(),
                         },
                     );
                     continue;
@@ -280,16 +230,21 @@ async fn run(mut commands: UnboundedReceiver<DbCommand>, events: UnboundedSender
                     let started = Instant::now();
                     let ev = match p.get(&database).await {
                         Ok(b) => match b.load_catalog(include_system).await {
-                            Ok(catalog) => DbEvent::CatalogLoaded {
-                                catalog,
-                                elapsed: started.elapsed(),
-                            },
+                            Ok(mut catalog) => {
+                                catalog.connection = connection;
+                                DbEvent::CatalogLoaded {
+                                    catalog,
+                                    elapsed: started.elapsed(),
+                                }
+                            }
                             Err(e) => DbEvent::CatalogFailed {
+                                connection,
                                 database,
                                 error: format!("{e:#}"),
                             },
                         },
                         Err(e) => DbEvent::CatalogFailed {
+                            connection,
                             database,
                             error: e.to_string(),
                         },
@@ -298,12 +253,12 @@ async fn run(mut commands: UnboundedReceiver<DbCommand>, events: UnboundedSender
                 });
             }
             DbCommand::LoadDetails(object) => {
-                let Some(p) = pool.clone() else {
+                let Some(p) = pool(&pools, &object.connection) else {
                     send(
                         &events,
                         DbEvent::DetailsFailed {
                             object,
-                            error: "not connected".into(),
+                            error: "non connecté".into(),
                         },
                     );
                     continue;
@@ -329,12 +284,12 @@ async fn run(mut commands: UnboundedReceiver<DbCommand>, events: UnboundedSender
                 });
             }
             DbCommand::FetchRows { id, request } => {
-                let Some(p) = pool.clone() else {
+                let Some(p) = pool(&pools, &request.object.connection) else {
                     send(
                         &events,
                         DbEvent::RowsFailed {
                             id,
-                            error: "not connected".into(),
+                            error: "non connecté".into(),
                         },
                     );
                     continue;
@@ -359,7 +314,9 @@ async fn run(mut commands: UnboundedReceiver<DbCommand>, events: UnboundedSender
                 });
             }
             DbCommand::CountRows { id, request, bound } => {
-                let Some(p) = pool.clone() else { continue };
+                let Some(p) = pool(&pools, &request.object.connection) else {
+                    continue;
+                };
                 let events = events.clone();
                 tokio::spawn(async move {
                     let result = match p.get(&request.object.database).await {
@@ -376,8 +333,11 @@ async fn run(mut commands: UnboundedReceiver<DbCommand>, events: UnboundedSender
                     send(&events, ev);
                 });
             }
-            DbCommand::Cancel { database } => {
-                if let Some(p) = pool.clone() {
+            DbCommand::Cancel {
+                connection,
+                database,
+            } => {
+                if let Some(p) = pool(&pools, &connection) {
                     tokio::spawn(async move {
                         let result = match p.get(&database).await {
                             Ok(b) => b.cancel().await,
@@ -397,13 +357,133 @@ async fn run(mut commands: UnboundedReceiver<DbCommand>, events: UnboundedSender
                     send(&events, DbEvent::Discovered(found));
                 });
             }
-            DbCommand::Disconnect => {
-                generation.fetch_add(1, Ordering::SeqCst);
-                pool = None;
+            DbCommand::Disconnect { connection } => {
+                if let Ok(mut p) = pools.lock() {
+                    p.bump(&connection);
+                }
+                tracing::info!(%connection, "disconnected");
             }
         }
     }
     tracing::debug!("db worker stopped");
+}
+
+/// Opens a connection: password, tunnel, first database, list of databases.
+async fn connect(
+    mut request: ConnectRequest,
+    resolve_password: bool,
+    generation: u64,
+    pools: SharedPools,
+    events: UnboundedSender<DbEvent>,
+) {
+    let connection = request.conn.name.clone();
+    let started = Instant::now();
+    let fail = |error: String, password_required: bool| DbEvent::ConnectFailed {
+        connection: connection.clone(),
+        error,
+        password_required,
+    };
+    if resolve_password && request.password.is_none() {
+        match password::resolve(&request.conn).await {
+            Ok(Some((pw, source))) => {
+                tracing::info!(%connection, ?source, "password resolved");
+                request.password = Some(pw);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                send(&events, fail(format!("{e:#}"), false));
+                return;
+            }
+        }
+    }
+    let on_lost: super::postgres::OnConnectionLost = {
+        let events = events.clone();
+        let pools = pools.clone();
+        let connection = connection.clone();
+        Arc::new(move |message: String| {
+            let current = pools
+                .lock()
+                .is_ok_and(|p| p.is_current(&connection, generation));
+            if current {
+                send(
+                    &events,
+                    DbEvent::ConnectionLost {
+                        connection: connection.clone(),
+                        message,
+                    },
+                );
+            }
+        })
+    };
+    let progress = |message: &str| DbEvent::Progress {
+        connection: connection.clone(),
+        message: message.into(),
+    };
+
+    let primary = request.conn.effective_database();
+    let mut template = request.clone();
+    let mut tunnel = None;
+    if let Some(cmd) = request.conn.tunnel_cmd.clone() {
+        send(&events, progress("Ouverture du tunnel…"));
+        let timeout = Duration::from_secs(request.conn.tunnel_timeout_secs.unwrap_or(15));
+        match super::tunnel::open(&cmd, timeout).await {
+            Ok(t) => {
+                template.conn.host = "127.0.0.1".into();
+                template.conn.port = t.port;
+                tunnel = Some(t);
+                send(&events, progress("Tunnel ouvert, connexion…"));
+            }
+            Err(e) => {
+                send(&events, fail(format!("{e:#}"), false));
+                return;
+            }
+        }
+    }
+    let has_tunnel = tunnel.is_some();
+    let p = Arc::new(Pool {
+        template,
+        on_lost: on_lost.clone(),
+        backends: Mutex::default(),
+        tunnel: tunnel.map(std::sync::Mutex::new),
+    });
+    match p.get(&primary).await {
+        Ok(b) => {
+            let info = b.info().clone();
+            let databases = b.list_databases().await.unwrap_or_else(|e| {
+                tracing::warn!(%connection, "cannot list databases: {e:#}");
+                Vec::new()
+            });
+            // A newer Connect or a Disconnect may have happened meanwhile.
+            let Ok(mut guard) = pools.lock() else { return };
+            if !guard.is_current(&connection, generation) {
+                return;
+            }
+            guard.open.insert(connection.clone(), p.clone());
+            drop(guard);
+            if has_tunnel {
+                watch_tunnel(Arc::downgrade(&p), on_lost);
+            }
+            send(
+                &events,
+                DbEvent::Connected {
+                    connection,
+                    info,
+                    databases,
+                    elapsed: started.elapsed(),
+                },
+            );
+        }
+        Err(e) => {
+            tracing::warn!(%connection, "connect failed: {e}");
+            send(
+                &events,
+                fail(
+                    e.to_string(),
+                    matches!(e, ConnectError::PasswordRequired(_)),
+                ),
+            );
+        }
+    }
 }
 
 /// Reports the death of the tunnel process (ssh killed, network down).

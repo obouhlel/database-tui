@@ -36,8 +36,10 @@ fn press(app: &mut App, keys: &str) {
 }
 
 fn connect(app: &mut App) {
+    let name = app.servers[0].conn.name.clone();
     press(app, "enter");
     app.update(Msg::Db(DbEvent::Connected {
+        connection: name.clone(),
         info: ServerInfo {
             kind: BackendKind::Postgres,
             version: "17.2".into(),
@@ -57,6 +59,7 @@ fn connect(app: &mut App) {
     };
     app.update(Msg::Db(DbEvent::CatalogLoaded {
         catalog: Catalog {
+            connection: name,
             database: "demo".into(),
             schemas: vec![Schema {
                 name: "shop".into(),
@@ -92,6 +95,7 @@ fn picker_lists_connections_and_warnings() {
     c.user = Some("postgres".into());
     c.read_only = true;
     let mut app = app(c);
+    press(&mut app, "ctrl+n");
     let screen = render(&mut app, 100, 20);
     assert!(screen.contains("local"), "{screen}");
     assert!(
@@ -140,7 +144,7 @@ fn open_object_shows_schema_tab() {
     let mut app = app(ConnectionConfig::named("demo"));
     connect(&mut app);
     let mut effects = Vec::new();
-    for c in KeyChord::parse_seq("j j j enter").unwrap() {
+    for c in KeyChord::parse_seq("j j j j enter").unwrap() {
         effects.extend(app.update(Msg::Key(KeyEvent::new(c.code, c.mods))));
     }
     let requested: Vec<_> = effects

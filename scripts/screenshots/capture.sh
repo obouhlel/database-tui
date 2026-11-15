@@ -72,7 +72,8 @@ palettes() { # name, title
   done
 }
 
-start "" 110 18; shot 01-selecteur "pgtui — connexions"
+start "" 110 18; keys C-n; shot 01-selecteur "pgtui — page des connexions"
+start "" 130 24; keys j Enter; sleep 1; keys G Enter; sleep 1.5; shot 19-multi-connexions "pgtui — plusieurs connexions ouvertes"
 start "--connection demo" 140 32
 keys / o r d e r s Enter Enter; sleep 0.5; shot 02-schema-colonnes "pgtui — Schema : colonnes"
 keys ']' ']' ']' ']'; shot 03-relations "pgtui — Schema : relations"
@@ -103,7 +104,7 @@ palettes 18-theme "pgtui — thème terminal"
 if (exec 3<>/dev/tcp/127.0.0.1/5432) 2>/dev/null; then
   PW="${PGTUI_SHOT_PASSWORD:-secret}"
   start "" 120 24
-  keys G; shot 14-detection "pgtui — serveurs détectés"
+  keys C-n G; shot 14-detection "pgtui — serveurs détectés"
   keys Enter; keys "$PW"; shot 15-connexion "pgtui — connexion à un serveur détecté"
   keys Enter; sleep 1.5; keys n; keys G l; sleep 1; shot 16-bases "pgtui — toutes les bases du serveur"
 fi

@@ -151,6 +151,9 @@ actions! {
     HideColumn => "hide_column", "Masquer la colonne";
     ShowColumns => "show_columns", "Réafficher les colonnes masquées";
     Cancel => "cancel", "Quitter la sélection / la recherche";
+    ConnectionsPage => "connections_page", "Page des connexions (serveurs détectés)";
+    Disconnect => "disconnect", "Fermer la connexion";
+    DeleteConnection => "delete_connection", "Supprimer la connexion de la liste";
 }
 
 #[derive(Debug, Clone)]
@@ -179,6 +182,7 @@ fn defaults() -> Vec<(Context, Action, &'static [&'static str])> {
         (Global, Help, &["?", "f1"]),
         (Global, CommandPalette, &[":", "ctrl+p"]),
         (Global, Interrupt, &["ctrl+c"]),
+        (Global, ConnectionsPage, &["ctrl+n"]),
         (Global, FocusTree, &["ctrl+h", "ctrl+w h"]),
         (Global, FocusCenter, &["ctrl+l", "ctrl+w l"]),
         (Global, FocusNext, &["ctrl+w w", "ctrl+w ctrl+w"]),
@@ -194,8 +198,11 @@ fn defaults() -> Vec<(Context, Action, &'static [&'static str])> {
         (Tree, Filter, &["/"]),
         (Tree, ClearFilter, &["esc"]),
         (Tree, ReloadCatalog, &["R"]),
+        (Tree, Disconnect, &["X"]),
+        (Tree, DeleteConnection, &["dd"]),
         (Picker, Connect, &["enter"]),
         (Picker, Refresh, &["R"]),
+        (Picker, Cancel, &["esc"]),
         (Schema, ScrollLeft, &["h", "left"]),
         (Schema, ScrollRight, &["l", "right"]),
         (Schema, FirstColumn, &["0"]),

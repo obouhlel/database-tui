@@ -215,6 +215,7 @@ async fn worker_connect_and_catalog() {
 
     commands
         .send(DbCommand::LoadCatalog {
+            connection: "test".into(),
             database: "demo".into(),
             include_system: false,
         })
@@ -228,9 +229,14 @@ async fn worker_connect_and_catalog() {
         other => panic!("unexpected {other:?}"),
     }
 
-    commands.send(DbCommand::Disconnect).unwrap();
+    commands
+        .send(DbCommand::Disconnect {
+            connection: "test".into(),
+        })
+        .unwrap();
     commands
         .send(DbCommand::LoadCatalog {
+            connection: "test".into(),
             database: "demo".into(),
             include_system: false,
         })
@@ -273,6 +279,7 @@ use pgtui::db::schema::{ConstraintKind, FkAction, Identity, ObjectDetails};
 
 fn obj(schema: &str, name: &str, kind: ObjectKind) -> ObjectRef {
     ObjectRef {
+        connection: "test".into(),
         database: "demo".into(),
         schema: schema.into(),
         name: name.into(),
@@ -908,6 +915,7 @@ async fn worker_opens_other_databases_lazily() {
     }
     commands
         .send(DbCommand::LoadCatalog {
+            connection: "test".into(),
             database: "postgres".into(),
             include_system: false,
         })
@@ -937,12 +945,15 @@ async fn worker_opens_other_databases_lazily() {
     // An unknown database is a clean error.
     commands
         .send(DbCommand::LoadCatalog {
+            connection: "test".into(),
             database: "nope".into(),
             include_system: false,
         })
         .unwrap();
     match next_event(&mut rx).await {
-        DbEvent::CatalogFailed { database, error } => {
+        DbEvent::CatalogFailed {
+            database, error, ..
+        } => {
             assert_eq!(database, "nope");
             assert!(error.contains("does not exist"), "{error}");
         }
@@ -988,7 +999,7 @@ async fn connects_through_a_tunnel_command() {
     let mut progress = Vec::new();
     loop {
         match next_event(&mut rx).await {
-            DbEvent::Progress(p) => progress.push(p),
+            DbEvent::Progress { message, .. } => progress.push(message),
             DbEvent::Connected {
                 info, databases, ..
             } => {
@@ -1006,6 +1017,7 @@ async fn connects_through_a_tunnel_command() {
     // Other databases go through the same tunnel.
     commands
         .send(DbCommand::LoadCatalog {
+            connection: "test".into(),
             database: "postgres".into(),
             include_system: false,
         })
@@ -1033,10 +1045,11 @@ async fn tunnel_failure_and_death_are_reported() {
         .unwrap();
     loop {
         match next_event(&mut rx).await {
-            DbEvent::Progress(_) => {}
+            DbEvent::Progress { .. } => {}
             DbEvent::ConnectFailed {
                 error,
                 password_required,
+                ..
             } => {
                 assert!(
                     error.contains("Could not resolve hostname bastion"),
@@ -1061,8 +1074,8 @@ async fn tunnel_failure_and_death_are_reported() {
     let lost = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             match rx.recv().await.unwrap() {
-                DbEvent::ConnectionLost(msg) => return msg,
-                DbEvent::Progress(_) | DbEvent::Connected { .. } => {}
+                DbEvent::ConnectionLost { message, .. } => return message,
+                DbEvent::Progress { .. } | DbEvent::Connected { .. } => {}
                 other => panic!("unexpected {other:?}"),
             }
         }
@@ -1070,4 +1083,52 @@ async fn tunnel_failure_and_death_are_reported() {
     .await
     .expect("tunnel death reported");
     assert!(!lost.is_empty());
+}
+
+/// Two connections open at once; closing one leaves the other usable.
+#[tokio::test]
+async fn worker_keeps_connections_apart() {
+    let Some(url) = test_url() else { return };
+    let (tx, mut rx) = unbounded_channel();
+    let commands = worker::spawn(tx);
+    for name in ["a", "b"] {
+        let mut req = request(&url);
+        req.conn.name = name.into();
+        commands
+            .send(DbCommand::Connect {
+                request: Box::new(req),
+                resolve_password: true,
+            })
+            .unwrap();
+    }
+    let mut connected = Vec::new();
+    while connected.len() < 2 {
+        match next_event(&mut rx).await {
+            DbEvent::Connected { connection, .. } => connected.push(connection),
+            DbEvent::Progress { .. } => {}
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    connected.sort();
+    assert_eq!(connected, ["a", "b"]);
+
+    commands
+        .send(DbCommand::Disconnect {
+            connection: "a".into(),
+        })
+        .unwrap();
+    for (name, ok) in [("b", true), ("a", false)] {
+        commands
+            .send(DbCommand::LoadCatalog {
+                connection: name.into(),
+                database: "demo".into(),
+                include_system: false,
+            })
+            .unwrap();
+        match next_event(&mut rx).await {
+            DbEvent::CatalogLoaded { catalog, .. } if ok => assert_eq!(catalog.connection, "b"),
+            DbEvent::CatalogFailed { connection, .. } if !ok => assert_eq!(connection, "a"),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
 }

@@ -18,7 +18,7 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
     frame.buffer_mut().set_style(area, bar);
 
     let mut left: Vec<Span> = Vec::new();
-    match &app.session {
+    match app.current_server() {
         Some(s) if app.screen == Screen::Main => {
             let color = s.conn.parsed_color().unwrap_or(t.accent);
             left.push(Span::styled(
@@ -28,8 +28,13 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
                     .fg(contrast(color))
                     .add_modifier(Modifier::BOLD),
             ));
-            let db = app.current_database().unwrap_or(&s.info.database);
-            left.push(Span::raw(format!(" {}@{db} ", s.info.user)));
+            match &s.info {
+                Some(info) => {
+                    let db = app.current_database().unwrap_or(&info.database);
+                    left.push(Span::raw(format!(" {}@{db} ", info.user)));
+                }
+                None => left.push(Span::styled(" non connecté ", Style::new().fg(t.dim))),
+            }
             if let Some(schema) = app.current_schema() {
                 left.push(sep(app));
                 left.push(Span::raw(format!(" {schema} ")));
@@ -56,7 +61,7 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
             if s.conn.is_production() {
                 left.push(badge(" PROD ", t.error));
             }
-            if s.lost.is_some() {
+            if matches!(s.state, crate::app::server::ConnState::Lost(_)) {
                 left.push(badge(" DÉCONNECTÉ ", t.error));
             }
         }

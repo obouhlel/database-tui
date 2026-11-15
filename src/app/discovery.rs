@@ -16,6 +16,8 @@ pub const LOGIN_FIELDS: [&str; 3] = ["Utilisateur", "Mot de passe", "Base"];
 #[derive(Debug, Clone)]
 pub struct LoginForm {
     pub server: DiscoveredServer,
+    /// Name of the connection created for this login (set on submit).
+    pub connection: String,
     pub fields: [LineInput; 3],
     pub field: usize,
     pub error: Option<String>,
@@ -26,6 +28,7 @@ impl LoginForm {
         let user = std::env::var("PGUSER").unwrap_or_else(|_| "postgres".into());
         Self {
             server,
+            connection: String::new(),
             fields: [
                 LineInput::with_text(user),
                 LineInput::default(),
@@ -58,15 +61,15 @@ pub enum PickerItem<'a> {
 
 impl App {
     pub fn picker_len(&self) -> usize {
-        self.connections.len() + self.discovered.len()
+        self.servers.len() + self.discovered.len()
     }
 
     pub fn picker_item(&self, i: usize) -> Option<PickerItem<'_>> {
-        match self.connections.get(i) {
-            Some((c, _)) => Some(PickerItem::Configured(c)),
+        match self.servers.get(i) {
+            Some(s) => Some(PickerItem::Configured(&s.conn)),
             None => self
                 .discovered
-                .get(i - self.connections.len())
+                .get(i - self.servers.len())
                 .map(PickerItem::Discovered),
         }
     }
@@ -159,8 +162,20 @@ impl App {
         };
         // An empty password lets trust / peer authentication work.
         let password = (!form.password().is_empty()).then(|| form.password().to_string());
+        let name = conn.name.clone();
+        let mut form = form;
+        form.connection = name.clone();
         self.login = Some(form);
-        self.start_connect(conn, password, false)
+        // The new connection appears in the tree, connecting.
+        self.servers
+            .push(super::server::Server::new(conn, None, false));
+        self.screen = super::Screen::Main;
+        self.focus = super::Focus::Tree;
+        self.tree
+            .expand_node(super::tree::NodeKey::Connection(name.clone()));
+        let effects = self.connect_server(&name, password, false);
+        self.tree.select(&super::tree::NodeKey::Connection(name));
+        effects
     }
 
     /// `localhost`, `localhost-5433`, `socket`, ... unique among connections.
@@ -176,7 +191,7 @@ impl App {
         if user != "postgres" {
             base.push_str(&format!("-{user}"));
         }
-        let taken = |n: &str| self.connections.iter().any(|(c, _)| c.name == n);
+        let taken = |n: &str| self.servers.iter().any(|s| s.conn.name == n);
         if !taken(&base) {
             return base;
         }
@@ -187,10 +202,21 @@ impl App {
     }
 
     /// The login failed: show the form again with the error.
-    pub(super) fn login_failed(&mut self, error: String) -> bool {
+    pub(super) fn login_failed(&mut self, connection: &str, error: String) -> bool {
+        if self
+            .login
+            .as_ref()
+            .is_none_or(|l| l.connection != connection)
+        {
+            return false;
+        }
         let Some(mut form) = self.login.take() else {
             return false;
         };
+        // The connection only existed for this attempt.
+        self.servers
+            .retain(|s| s.conn.name != connection || s.saved);
+        self.refresh_tree();
         form.error = Some(error);
         form.fields[1].clear();
         form.field = 1;
@@ -200,11 +226,18 @@ impl App {
 
     /// The login succeeded: offer to save the server (without password).
     pub(super) fn login_succeeded(&mut self, conn: &crate::config::ConnectionConfig) {
-        if self.login.take().is_none() {
+        if self
+            .login
+            .as_ref()
+            .is_none_or(|l| l.connection != conn.name)
+        {
             return;
         }
-        let known = self.connections.iter().any(|(c, _)| {
-            c.host == conn.host
+        self.login = None;
+        let known = self.servers.iter().any(|s| {
+            let c = &s.conn;
+            s.saved
+                && c.host == conn.host
                 && c.port == conn.port
                 && c.user == conn.user
                 && c.database == conn.database
@@ -220,7 +253,9 @@ impl App {
         };
         match key.code {
             KeyCode::Char('o' | 'O' | 'y' | 'Y') | KeyCode::Enter => {
-                self.connections.push(((*conn).clone(), None));
+                if let Some(s) = self.server_mut(&conn.name) {
+                    s.saved = true;
+                }
                 vec![Effect::SaveConnection(conn)]
             }
             KeyCode::Char('n' | 'N') | KeyCode::Esc => Vec::new(),

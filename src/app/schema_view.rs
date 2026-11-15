@@ -501,6 +501,7 @@ mod tests {
 
     fn obj(name: &str) -> ObjectRef {
         ObjectRef {
+            connection: "test".into(),
             database: "demo".into(),
             schema: "shop".into(),
             name: name.into(),

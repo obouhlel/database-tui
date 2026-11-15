@@ -509,6 +509,91 @@ pub fn append_connection(path: &Path, conn: &ConnectionConfig) -> Result<(), Con
     })
 }
 
+/// Removes the `[[connections]]` block named `name` from the file, with
+/// the comment lines directly above it. Everything else (other blocks and
+/// their comments) is left untouched.
+pub fn remove_connection(path: &Path, name: &str) -> Result<(), ConfigError> {
+    let content = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let updated = remove_connection_text(&content, name).ok_or_else(|| {
+        ConfigError::Invalid(format!(
+            "connection `{name}` not found in {}",
+            path.display()
+        ))
+    })?;
+    let (config, _) = Config::parse(&updated, path)?;
+    if config.connection(name).is_some() {
+        return Err(ConfigError::Invalid(format!(
+            "connection `{name}` is defined several times"
+        )));
+    }
+    std::fs::write(path, updated).map_err(|source| ConfigError::Write {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn remove_connection_text(content: &str, name: &str) -> Option<String> {
+    let lines: Vec<&str> = content.lines().collect();
+    let is_header = |l: &str| l.trim_start().starts_with('[');
+    let is_comment = |l: &str| l.trim_start().starts_with('#');
+    let headers: Vec<usize> = (0..lines.len()).filter(|i| is_header(lines[*i])).collect();
+    for (h, &start) in headers.iter().enumerate() {
+        if lines[start].trim() != "[[connections]]" {
+            continue;
+        }
+        let next = headers.get(h + 1).copied().unwrap_or(lines.len());
+        // The block ends after its last key, plus the commented keys that
+        // follow it directly; comments right above the next header, or after
+        // a blank line, belong to what follows.
+        let is_blank = |l: &str| l.trim().is_empty();
+        let last_key = (start..next)
+            .rev()
+            .find(|&i| !is_blank(lines[i]) && !is_comment(lines[i]))?;
+        let mut end = last_key + 1;
+        let mut tail = end;
+        while tail < next && is_comment(lines[tail]) {
+            tail += 1;
+        }
+        if tail < next {
+            end = tail;
+        }
+        let block = lines[start..end].join("\n");
+        let table: toml::Table = toml::from_str(&block).ok()?;
+        let block_name = table
+            .get("connections")?
+            .as_array()?
+            .first()?
+            .get("name")?
+            .as_str()?;
+        if block_name != name {
+            continue;
+        }
+        // Own comments: contiguous comment lines directly above the header.
+        let mut from = start;
+        while from > 0 && is_comment(lines[from - 1]) {
+            from -= 1;
+        }
+        let to = end;
+        let mut kept: Vec<&str> = lines[..from].to_vec();
+        // Avoid leaving two blank lines where the block was.
+        while kept.last().is_some_and(|l| l.trim().is_empty())
+            && lines.get(to).is_none_or(|l| l.trim().is_empty())
+        {
+            kept.pop();
+        }
+        kept.extend_from_slice(&lines[to..]);
+        let mut out = kept.join("\n");
+        if content.ends_with('\n') {
+            out.push('\n');
+        }
+        return Some(out);
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -692,6 +777,51 @@ mod tests {
         // A duplicate name is refused (the file would not load any more).
         assert!(append_connection(&path, &c).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    }
+
+    #[test]
+    fn remove_connection_keeps_the_rest() {
+        let text = "[general]\npage_size = 50\n\n# Ma base locale\n[[connections]]\nname = \"local\"\nport = 5432\n\n\
+                    # Démo docker\n[[connections]]\nname = \"demo\"\nport = 5433\n\n# autre commentaire\n";
+        let out = remove_connection_text(text, "local").unwrap();
+        assert!(
+            !out.contains("Ma base locale") && !out.contains("\"local\""),
+            "{out}"
+        );
+        assert!(
+            out.contains("# Démo docker\n[[connections]]\nname = \"demo\""),
+            "{out}"
+        );
+        assert!(out.contains("page_size = 50"));
+        let (config, _) = Config::parse(&out, Path::new("t")).unwrap();
+        assert_eq!(config.connections.len(), 1);
+        assert!(!out.contains("\n\n\n"), "no double blank line: {out:?}");
+
+        let out = remove_connection_text(text, "demo").unwrap();
+        assert!(
+            !out.contains("Démo docker") && out.contains("# autre commentaire"),
+            "{out}"
+        );
+        assert!(remove_connection_text(text, "nope").is_none());
+    }
+
+    #[test]
+    fn remove_connection_from_the_example_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, EXAMPLE_CONFIG).unwrap();
+        remove_connection(&path, "demo").unwrap();
+        remove_connection(&path, "local").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let (config, _) = Config::parse(&text, &path).unwrap();
+        assert!(config.connections.is_empty());
+        // The commented examples and the other sections are still there.
+        assert!(
+            text.contains("# [[connections]]\n# name = \"prod\""),
+            "{text}"
+        );
+        assert!(text.contains("[keymap.global]") || text.contains("# [keymap.global]"));
+        assert!(remove_connection(&path, "demo").is_err());
     }
 
     #[test]

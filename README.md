@@ -2,7 +2,7 @@
 
 Client PostgreSQL en mode texte (TUI), entièrement pilotable au clavier — une alternative légère à DBeaver pour l'usage quotidien.
 
-> **État : jalon 3 / 6** — connexions, arbre des objets, onglet Schema, onglet Data en lecture (pagination serveur, tri, filtres, recherche, détail, copie).
+> **État : jalon 3 / 6** — arbre des connexions (plusieurs ouvertes à la fois), arbre des objets, onglet Schema, onglet Data en lecture (pagination serveur, tri, filtres, recherche, détail, copie).
 > L'édition et l'onglet SQL arrivent aux jalons suivants (voir [Feuille de route](#feuille-de-route)).
 
 ## Captures
@@ -14,6 +14,7 @@ Client PostgreSQL en mode texte (TUI), entièrement pilotable au clavier — une
 | ![Onglet Schema : colonnes](docs/screenshots/02-schema-colonnes.png) | ![DDL](docs/screenshots/04-ddl.png) |
 | ![Filtre par colonne](docs/screenshots/11-data-filtre.png) | ![Détail d'une ligne](docs/screenshots/12-data-detail.png) |
 | ![Tri et sélection](docs/screenshots/13-data-tri.png) | ![Connexion de production](docs/screenshots/08-prod.png) |
+| ![Plusieurs connexions ouvertes](docs/screenshots/19-multi-connexions.png) | ![Page des connexions](docs/screenshots/01-selecteur.png) |
 
 Captures du vrai binaire, régénérables avec `scripts/screenshots/capture.sh` (tmux, Python, Node + Playwright, base de démo lancée).
 
@@ -49,7 +50,7 @@ La base de démo (`docker/initdb/`) contient trois schémas (`shop`, `hr`, `audi
 
 Au démarrage, pgtui cherche les serveurs PostgreSQL de la machine : port 5432 sur `127.0.0.1` et `::1`, et sockets Unix dans `/var/run/postgresql`, `/run/postgresql` et `/tmp`. Chaque candidat reçoit le paquet d'ouverture `SSLRequest` : un serveur PostgreSQL répond `S` ou `N`, ce qui l'identifie sans s'authentifier. Rien n'est scanné sur le réseau.
 
-Les serveurs trouvés apparaissent dans le sélecteur, sous les connexions configurées. `Entrée` ouvre un formulaire **utilisateur / mot de passe / base** (base `postgres` par défaut). En cas d'erreur, le formulaire revient avec le message du serveur. Une fois connecté, pgtui propose d'ajouter le serveur à `config.toml`, **sans le mot de passe**. `R` relance la détection.
+Les serveurs trouvés apparaissent dans la page des connexions (`Ctrl+n`), sous les connexions configurées. `Entrée` ouvre un formulaire **utilisateur / mot de passe / base** (base `postgres` par défaut). En cas d'erreur, le formulaire revient avec le message du serveur. Une fois connecté, pgtui propose d'ajouter le serveur à `config.toml`, **sans le mot de passe**. `R` relance la détection.
 
 ```toml
 [general]
@@ -60,21 +61,25 @@ discover_ports = [5432]    # ex. [5432, 5433]
 | ![Serveurs détectés](docs/screenshots/14-detection.png) | ![Toutes les bases](docs/screenshots/16-bases.png) |
 |---|---|
 
+## Arbre des connexions
+
+pgtui démarre directement sur l'écran principal : l'arbre à gauche, les données à droite. La racine de l'arbre liste **les connexions** (config.toml, `--url`, `DATABASE_URL`, serveurs ajoutés depuis la détection). `Entrée` ou `l` sur une connexion la connecte et la déplie ; plusieurs connexions peuvent être ouvertes en même temps, chacune avec son état (« connexion… », version du serveur, « erreur », « déconnecté »). `X` ferme la connexion sous le curseur, `dd` la retire de la liste et de `config.toml` après confirmation (aucune base n'est supprimée sur le serveur). La page des connexions et des serveurs détectés s'ouvre avec `Ctrl+n` ou `:connections`.
+
 ## Toutes les bases du serveur
 
-L'arbre affiche à sa racine **toutes les bases** du serveur, avec leur taille (`pg_database`, hors modèles). La base de connexion est dépliée ; déplier une autre base ouvre une connexion vers elle, avec les mêmes identifiants, et charge ses schémas. Une base sans le droit `CONNECT` est marquée « accès refusé ». La barre de statut et l'en-tête des onglets indiquent la base de l'objet ouvert.
+Sous chaque connexion, l'arbre affiche **toutes les bases** du serveur, avec leur taille (`pg_database`, hors modèles). La base de connexion est dépliée ; déplier une autre base ouvre une connexion vers elle, avec les mêmes identifiants, et charge ses schémas. Une base sans le droit `CONNECT` est marquée « accès refusé ». La barre de statut et l'en-tête des onglets indiquent la base de l'objet ouvert.
 
 ## Lancement
 
 ```
-pgtui                          # sélecteur de connexion
-pgtui --connection <nom>       # connexion directe à une entrée de config.toml
-pgtui --url <URL>              # connexion directe à une URL postgres:// ou "host=… user=…"
+pgtui                          # arbre des connexions, aucune connexion ouverte
+pgtui --connection <nom>       # ouvre directement une entrée de config.toml
+pgtui --url <URL>              # ajoute et ouvre une URL postgres:// ou "host=… user=…"
 pgtui --config <fichier>       # autre fichier de configuration
 pgtui --check-config           # valide la configuration et quitte
 ```
 
-Si `DATABASE_URL` est défini, il apparaît comme entrée supplémentaire dans le sélecteur (sans connexion automatique).
+Si `DATABASE_URL` est défini, il apparaît comme connexion supplémentaire dans l'arbre (sans connexion automatique).
 
 ## Configuration
 
@@ -83,7 +88,7 @@ Fichier : `~/.config/pgtui/config.toml`, créé avec un exemple commenté au pre
 ```toml
 [general]
 page_size = 200               # lignes par page dans la vue Data
-default_connection = "local"  # présélectionnée dans le sélecteur
+default_connection = "local"  # sélectionnée dans l'arbre au démarrage
 keymap = "default"            # preset ; surcharges dans [keymap]
 theme = "terminal"            # "terminal" (couleurs du terminal) | "dark" | "light"
 mouse = false                 # capture souris (désactive la sélection native du terminal)
@@ -181,18 +186,22 @@ Couleurs : noms (`red`, `light-blue`, `orange`…), `#rrggbb` ou index ANSI (`20
 | | `Tab` / `Shift+Tab` | Onglet suivant / précédent |
 | | `1` `2` `3` · `Alt+1/2/3` | Onglet Schema / Data / SQL |
 | | `Ctrl+c` | Annuler l'opération en cours (ne quitte pas) |
+| | `Ctrl+n` | Page des connexions et des serveurs détectés |
 | Arbre | `j`/`k` · `↓`/`↑` | Descendre / monter |
 | | `gg` / `G` · `Home`/`End` | Début / fin |
 | | `Ctrl+d` / `Ctrl+u` | Demi-page |
 | | `PgDn`/`PgUp` · `Ctrl+f`/`Ctrl+b` | Page |
 | | `l` / `h` · `→`/`←` | Déplier / replier (ou aller au parent) |
 | | `zM` · `-` | Tout replier |
-| | `Enter` | Ouvrir l'objet / déplier le dossier |
+| | `Enter` | Connecter / ouvrir l'objet / déplier le dossier |
+| | `X` | Fermer la connexion sous le curseur |
+| | `dd` | Retirer la connexion de la liste et de `config.toml` (confirmation) |
 | | `/` | Filtre flou (`schema.table` pour qualifier) |
 | | `Esc` | Effacer le filtre |
 | | `R` | Recharger le catalogue |
-| Sélecteur | `Enter` | Se connecter (formulaire utilisateur / mot de passe pour un serveur détecté) |
+| Page connexions | `Enter` | Se connecter (formulaire utilisateur / mot de passe pour un serveur détecté) |
 | | `R` | Relancer la détection des serveurs locaux |
+| | `Esc` · `q` | Revenir à l'écran principal |
 | Onglet Schema | `[` / `]` | Section précédente / suivante (Colonnes, Index, Contraintes, Triggers, Relations, DDL, Infos) |
 | | `j`/`k`, `gg`/`G`, `Ctrl+d`/`Ctrl+u` | Naviguer dans la section |
 | | `h`/`l` · `←`/`→`, `0` / `$` | Défiler horizontalement (colonnes, ou texte du DDL) |
@@ -215,7 +224,7 @@ Couleurs : noms (`red`, `light-blue`, `orange`…), `#rrggbb` ou index ANSI (`20
 
 **Presse-papier** — `auto` utilise le presse-papier système (X11, Wayland, macOS, Windows) et bascule sur la séquence OSC 52 (copie via le terminal) en SSH ou si le presse-papier système est indisponible. Sous tmux, OSC 52 demande `set -g set-clipboard on`.
 
-Commandes : `:q`, `:help`, `:reload`, `:connect <nom>`, `:connections`, `:reconnect`, `:schema`, `:data`, `:sql`.
+Commandes : `:q`, `:help`, `:reload`, `:connect <nom>`, `:connections`, `:reconnect`, `:disconnect`, `:schema`, `:data`, `:sql`.
 
 Les terminaux compatibles avec le protocole clavier kitty (kitty, WezTerm, Ghostty, foot, Alacritty récent) distinguent `Ctrl+Enter` d'`Enter` ; pgtui l'active automatiquement. Ailleurs (tmux, gnome-terminal), des touches de repli seront toujours proposées.
 

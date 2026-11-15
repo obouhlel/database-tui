@@ -113,6 +113,8 @@ pub async fn load(client: &Client, database: &str, include_system: bool) -> Resu
     // User schemas first, `public` leading them; system schemas last.
     schemas.sort_by_key(|s| (s.is_system, s.name != "public", s.name.clone()));
     Ok(Catalog {
+        // Set by the worker, which knows the connection name.
+        connection: String::new(),
         database: database.to_string(),
         schemas,
     })

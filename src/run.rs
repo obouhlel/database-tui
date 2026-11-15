@@ -80,6 +80,19 @@ fn run_effect(
             };
             let _ = app.update(msg);
         }
+        Effect::DeleteConnection(name) => {
+            let msg = match app.config_path.clone() {
+                Some(path) => match crate::config::remove_connection(&path, &name) {
+                    Ok(()) => Msg::Notify(
+                        Level::Success,
+                        format!("« {name} » supprimé de {}", path.display()),
+                    ),
+                    Err(e) => Msg::Notify(Level::Error, format!("Suppression impossible : {e}")),
+                },
+                None => Msg::Notify(Level::Error, "Fichier de configuration inconnu".into()),
+            };
+            let _ = app.update(msg);
+        }
         Effect::Copy(text) => match clipboard.copy(&text) {
             Ok(method) => tracing::debug!(bytes = text.len(), method, "copied"),
             Err(e) => {

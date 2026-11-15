@@ -54,7 +54,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     match &app.current {
         Some(obj) => {
             let comment = app
-                .catalog(&obj.database)
+                .catalog(&obj.connection, &obj.database)
                 .and_then(|c| c.schemas.iter().find(|s| s.name == obj.schema))
                 .and_then(|s| {
                     s.objects.iter().find(|o| {
@@ -98,10 +98,10 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
-    if let Some(s) = &app.session {
+    if let Some(s) = app.current_server() {
         lines.push(Line::default());
         lines.push(Line::styled(
-            "Session",
+            format!("Connexion {}", s.conn.name),
             Style::new().fg(t.accent).add_modifier(Modifier::BOLD),
         ));
         let mut kv = |k: &str, v: String| {
@@ -110,16 +110,32 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 Span::styled(v, value),
             ]));
         };
-        kv("Serveur", format!("PostgreSQL {}", s.info.version));
+        let state = match &s.state {
+            crate::app::server::ConnState::Disconnected => {
+                "non connecté — Entrée ou l pour se connecter".to_string()
+            }
+            crate::app::server::ConnState::Connecting(_) => "connexion…".to_string(),
+            crate::app::server::ConnState::Connected => "connecté".to_string(),
+            crate::app::server::ConnState::Failed(e) => format!("échec : {e}"),
+            crate::app::server::ConnState::Lost(e) => {
+                format!("perdue : {e} — Entrée pour reconnecter")
+            }
+        };
+        kv("État", state);
         kv("Cible", s.conn.target());
         if let Some(cmd) = &s.conn.tunnel_cmd {
             kv("Tunnel", cmd.clone());
         }
-        kv("Utilisateur", s.info.user.clone());
-        kv("Base", s.info.database.clone());
+        let Some(info) = &s.info else {
+            frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+            return;
+        };
+        kv("Serveur", format!("PostgreSQL {}", info.version));
+        kv("Utilisateur", info.user.clone());
+        kv("Base", info.database.clone());
         kv(
             "TLS",
-            if s.info.tls {
+            if info.tls {
                 format!("oui ({})", s.conn.sslmode.as_str())
             } else {
                 "non".into()

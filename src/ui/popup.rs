@@ -204,3 +204,42 @@ pub fn draw_save_server(frame: &mut Frame, app: &App, conn: &ConnectionConfig, a
         rect,
     );
 }
+
+pub fn draw_confirm_delete(frame: &mut Frame, app: &App, name: &str, area: Rect) {
+    let t = &app.theme;
+    let rect = centered(area, 64, 7);
+    let saved = app.server(name).is_some_and(|s| s.saved);
+    let block = Block::bordered()
+        .title(Span::styled(
+            " Supprimer la connexion ? ",
+            Style::new().fg(t.error).add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Line::styled(" o : supprimer · n / Esc : annuler ", t.dim()))
+        .border_style(Style::new().fg(t.error))
+        .style(t.base());
+    frame.render_widget(Clear, rect);
+    let detail = if saved {
+        "Elle sera retirée de la liste et de config.toml."
+    } else {
+        "Elle sera retirée de la liste (elle n'est pas dans config.toml)."
+    };
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("Supprimer « ", Style::new().fg(t.fg)),
+            Span::styled(
+                name.to_string(),
+                Style::new().fg(t.accent).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" » ?", Style::new().fg(t.fg)),
+        ]),
+        Line::default(),
+        Line::styled(detail, t.dim()),
+        Line::styled("Rien n'est modifié sur le serveur.", t.dim()),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false }),
+        rect,
+    );
+}

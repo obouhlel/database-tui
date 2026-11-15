@@ -193,9 +193,9 @@ async fn relation(client: &Client, obj: &ObjectRef) -> Result<ObjectDetails> {
     for r in &fk_rows {
         let fk = ForeignKey {
             name: r.get(0),
-            from: relation_ref(&obj.database, r.get(1), r.get(2), &r.get::<_, String>(3)),
+            from: relation_ref(obj, r.get(1), r.get(2), &r.get::<_, String>(3)),
             from_columns: r.get(4),
-            to: relation_ref(&obj.database, r.get(5), r.get(6), &r.get::<_, String>(7)),
+            to: relation_ref(obj, r.get(5), r.get(6), &r.get::<_, String>(7)),
             to_columns: r.get(8),
             on_update: FkAction::from_pg(&r.get::<_, String>(9)),
             on_delete: FkAction::from_pg(&r.get::<_, String>(10)),
@@ -495,7 +495,7 @@ fn split_top_level(s: &str) -> Vec<String> {
     parts
 }
 
-fn relation_ref(database: &str, schema: String, name: String, relkind: &str) -> ObjectRef {
+fn relation_ref(origin: &ObjectRef, schema: String, name: String, relkind: &str) -> ObjectRef {
     let kind = match relkind {
         "p" => ObjectKind::PartitionedTable,
         "f" => ObjectKind::ForeignTable,
@@ -504,7 +504,8 @@ fn relation_ref(database: &str, schema: String, name: String, relkind: &str) -> 
         _ => ObjectKind::Table,
     };
     ObjectRef {
-        database: database.to_string(),
+        connection: origin.connection.clone(),
+        database: origin.database.clone(),
         schema,
         name,
         kind,

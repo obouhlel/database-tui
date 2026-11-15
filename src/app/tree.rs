@@ -1,9 +1,11 @@
-//! Tree state: `database > schema > group > object`, flattened into rows.
+//! Tree state: `connection > database > schema > group > object`,
+//! flattened into rows.
 //!
-//! Every database of the server is a root node; its catalog is loaded when
-//! the node is expanded (see `App::sync_catalogs`). Rows are rebuilt only
-//! when catalogs, the expansion set or the filter change; rendering just
-//! slices `rows[offset..offset + viewport]`.
+//! Connections are the roots: expanding one connects it (see
+//! `App::sync_connections`), expanding a database loads its catalog (see
+//! `App::sync_catalogs`). Rows are rebuilt only when servers, the expansion
+//! set or the filter change; rendering just slices
+//! `rows[offset..offset + viewport]`.
 
 use std::collections::HashSet;
 
@@ -11,9 +13,12 @@ use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Matcher, Utf32Str};
 
 use super::input::LineInput;
-use crate::db::catalog::{Catalog, DatabaseInfo, ObjectGroup, ObjectKind, ObjectRef, Schema};
+use super::server::{ConnState, Server};
+use crate::db::catalog::{
+    Catalog, DatabaseInfo, DbObject, ObjectGroup, ObjectKind, ObjectRef, Schema,
+};
 
-/// A database of the server and the loading state of its catalog.
+/// A database of a server and the loading state of its catalog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DatabaseEntry {
     pub info: DatabaseInfo,
@@ -39,25 +44,41 @@ impl DatabaseEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum NodeKey {
-    Database(String),
-    /// (database, schema)
-    Schema(String, String),
-    /// (database, schema, group)
-    Group(String, String, ObjectGroup),
+    Connection(String),
+    /// (connection, database)
+    Database(String, String),
+    /// (connection, database, schema)
+    Schema(String, String, String),
+    /// (connection, database, schema, group)
+    Group(String, String, String, ObjectGroup),
     Object(ObjectRef),
 }
 
 impl NodeKey {
-    pub fn database(&self) -> &str {
+    pub fn connection(&self) -> &str {
         match self {
-            NodeKey::Database(d) | NodeKey::Schema(d, _) | NodeKey::Group(d, _, _) => d,
-            NodeKey::Object(o) => &o.database,
+            NodeKey::Connection(c)
+            | NodeKey::Database(c, _)
+            | NodeKey::Schema(c, _, _)
+            | NodeKey::Group(c, _, _, _) => c,
+            NodeKey::Object(o) => &o.connection,
+        }
+    }
+
+    pub fn database(&self) -> Option<&str> {
+        match self {
+            NodeKey::Connection(_) => None,
+            NodeKey::Database(_, d) | NodeKey::Schema(_, d, _) | NodeKey::Group(_, d, _, _) => {
+                Some(d)
+            }
+            NodeKey::Object(o) => Some(&o.database),
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowKind {
+    Connection,
     Database,
     Schema,
     Group(ObjectGroup),
@@ -73,7 +94,7 @@ pub struct TreeRow {
     pub expanded: bool,
     /// Number of children (objects in a group, matches when filtering).
     pub count: Option<usize>,
-    /// Dim text after the label (database size, loading, error).
+    /// Dim text after the label (state, size, ...).
     pub note: Option<String>,
     /// Character indices of `label` matched by the filter.
     pub highlights: Vec<usize>,
@@ -108,59 +129,84 @@ pub struct TreeState {
     pub filter_editing: bool,
     expanded: HashSet<NodeKey>,
     /// Databases whose first schema was auto-expanded once loaded.
-    initialised: HashSet<String>,
+    initialised: HashSet<(String, String)>,
 }
 
 impl TreeState {
     /// Rebuilds rows, keeping the cursor on the same node when it still exists.
-    pub fn rebuild(&mut self, dbs: &[DatabaseEntry]) {
-        self.rebuild_with(dbs, true);
+    pub fn rebuild(&mut self, servers: &[Server]) {
+        self.rebuild_with(servers, true);
     }
 
     /// To call when the filter text changed: the cursor jumps to the best
     /// match instead of staying on the object matched by a shorter query.
-    pub fn filter_changed(&mut self, dbs: &[DatabaseEntry]) {
+    pub fn filter_changed(&mut self, servers: &[Server]) {
         // With an empty filter, staying on the last match keeps the context.
         let keep = self.filter.is_empty();
-        self.rebuild_with(dbs, keep);
+        self.rebuild_with(servers, keep);
     }
 
-    /// Expands a database node (the one connected to, at startup).
-    pub fn expand_database(&mut self, name: &str) {
-        self.expanded.insert(NodeKey::Database(name.to_string()));
+    pub fn expand_node(&mut self, key: NodeKey) {
+        self.expanded.insert(key);
+    }
+
+    pub fn collapse_node(&mut self, key: &NodeKey) {
+        self.expanded.remove(key);
     }
 
     pub fn is_expanded(&self, key: &NodeKey) -> bool {
         self.expanded.contains(key)
     }
 
-    fn rebuild_with(&mut self, dbs: &[DatabaseEntry], keep_selection: bool) {
+    /// Forgets the expansion state below a connection (after disconnecting).
+    pub fn forget_connection(&mut self, connection: &str) {
+        self.expanded
+            .retain(|k| k.connection() != connection || matches!(k, NodeKey::Connection(_)));
+        self.initialised.retain(|(c, _)| c != connection);
+    }
+
+    /// Puts the cursor on a node if it is visible.
+    pub fn select(&mut self, key: &NodeKey) -> bool {
+        match self.rows.iter().position(|r| &r.key == key) {
+            Some(i) => {
+                self.cursor = i;
+                self.scroll_into_view();
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn rebuild_with(&mut self, servers: &[Server], keep_selection: bool) {
         // First load of a catalog: open its first user schema and its tables.
-        for db in dbs {
-            let Some(catalog) = &db.catalog else { continue };
-            if self.initialised.insert(db.name().to_string())
-                && let Some(first) = catalog.schemas.iter().find(|s| !s.is_system)
-            {
-                self.expanded
-                    .insert(NodeKey::Schema(db.name().into(), first.name.clone()));
-                self.expanded.insert(NodeKey::Group(
-                    db.name().into(),
-                    first.name.clone(),
-                    ObjectGroup::Tables,
-                ));
+        for s in servers {
+            for db in &s.databases {
+                let Some(catalog) = &db.catalog else { continue };
+                if self.initialised.insert((s.name().into(), db.name().into()))
+                    && let Some(first) = catalog.schemas.iter().find(|x| !x.is_system)
+                {
+                    let (c, d) = (s.name().to_string(), db.name().to_string());
+                    self.expanded
+                        .insert(NodeKey::Schema(c.clone(), d.clone(), first.name.clone()));
+                    self.expanded.insert(NodeKey::Group(
+                        c,
+                        d,
+                        first.name.clone(),
+                        ObjectGroup::Tables,
+                    ));
+                }
             }
         }
-        // While filtering, only an object selection is worth keeping: a
-        // database, schema or group would hide the first match.
+        // While filtering, only an object selection is worth keeping.
         let selected = self
             .selected()
             .filter(|_| keep_selection)
             .filter(|r| self.filter.is_empty() || matches!(r.kind, RowKind::Object(_)))
             .map(|r| r.key.clone());
         self.rows = if self.filter.is_empty() {
-            self.build_rows(dbs)
+            self.build_rows(servers)
         } else {
-            build_filtered(dbs, self.filter.text())
+            build_filtered(servers, self.filter.text())
         };
         self.cursor = selected
             .and_then(|k| self.rows.iter().position(|r| r.key == k))
@@ -181,47 +227,65 @@ impl TreeState {
         self.scroll_into_view();
     }
 
-    fn build_rows(&self, dbs: &[DatabaseEntry]) -> Vec<TreeRow> {
+    fn build_rows(&self, servers: &[Server]) -> Vec<TreeRow> {
         let mut rows = Vec::new();
-        for db in dbs {
-            let dkey = NodeKey::Database(db.name().to_string());
-            let d_open = self.expanded.contains(&dkey);
-            let mut row = TreeRow::node(dkey, RowKind::Database, 0, db.name().to_string(), d_open);
-            row.note = database_note(db);
+        for s in servers {
+            let c = s.name().to_string();
+            let ckey = NodeKey::Connection(c.clone());
+            let c_open = self.expanded.contains(&ckey);
+            let mut row = TreeRow::node(ckey, RowKind::Connection, 0, c.clone(), c_open);
+            row.note = connection_note(s);
             rows.push(row);
-            let (true, Some(catalog)) = (d_open, &db.catalog) else {
+            if !(c_open && s.is_connected()) {
                 continue;
-            };
-            for schema in &catalog.schemas {
-                let skey = NodeKey::Schema(db.name().into(), schema.name.clone());
-                let s_open = self.expanded.contains(&skey);
-                rows.push(TreeRow::node(
-                    skey,
-                    RowKind::Schema,
-                    1,
-                    schema.name.clone(),
-                    s_open,
-                ));
-                if !s_open {
+            }
+            for db in &s.databases {
+                let dkey = NodeKey::Database(c.clone(), db.name().to_string());
+                let d_open = self.expanded.contains(&dkey);
+                let mut row =
+                    TreeRow::node(dkey, RowKind::Database, 1, db.name().to_string(), d_open);
+                row.note = database_note(db);
+                rows.push(row);
+                let (true, Some(catalog)) = (d_open, &db.catalog) else {
                     continue;
-                }
-                for group in ObjectGroup::ALL {
-                    let objects: Vec<_> = schema.objects_in(group).collect();
-                    if objects.is_empty() {
+                };
+                for schema in &catalog.schemas {
+                    let skey = NodeKey::Schema(c.clone(), db.name().into(), schema.name.clone());
+                    let s_open = self.expanded.contains(&skey);
+                    rows.push(TreeRow::node(
+                        skey,
+                        RowKind::Schema,
+                        2,
+                        schema.name.clone(),
+                        s_open,
+                    ));
+                    if !s_open {
                         continue;
                     }
-                    let gkey = NodeKey::Group(db.name().into(), schema.name.clone(), group);
-                    let g_open = self.expanded.contains(&gkey);
-                    let mut g =
-                        TreeRow::node(gkey, RowKind::Group(group), 2, group.label().into(), g_open);
-                    g.count = Some(objects.len());
-                    rows.push(g);
-                    if g_open {
-                        rows.extend(
-                            objects
-                                .into_iter()
-                                .map(|(_, o)| object_row(db.name(), schema, o)),
+                    for group in ObjectGroup::ALL {
+                        let objects: Vec<_> = schema.objects_in(group).collect();
+                        if objects.is_empty() {
+                            continue;
+                        }
+                        let gkey =
+                            NodeKey::Group(c.clone(), db.name().into(), schema.name.clone(), group);
+                        let g_open = self.expanded.contains(&gkey);
+                        let mut g = TreeRow::node(
+                            gkey,
+                            RowKind::Group(group),
+                            3,
+                            group.label().into(),
+                            g_open,
                         );
+                        g.count = Some(objects.len());
+                        rows.push(g);
+                        if g_open {
+                            rows.extend(
+                                objects
+                                    .into_iter()
+                                    .map(|(_, o)| object_row(&c, db.name(), schema, o)),
+                            );
+                        }
                     }
                 }
             }
@@ -243,14 +307,18 @@ impl TreeState {
     /// Schema of the node under the cursor.
     pub fn selected_schema(&self) -> Option<&str> {
         Some(match &self.selected()?.key {
-            NodeKey::Schema(_, s) | NodeKey::Group(_, s, _) => s,
+            NodeKey::Schema(_, _, s) | NodeKey::Group(_, _, s, _) => s,
             NodeKey::Object(o) => &o.schema,
-            NodeKey::Database(_) => return None,
+            NodeKey::Connection(_) | NodeKey::Database(..) => return None,
         })
     }
 
     pub fn selected_database(&self) -> Option<&str> {
-        self.selected().map(|r| r.key.database())
+        self.selected()?.key.database()
+    }
+
+    pub fn selected_connection(&self) -> Option<&str> {
+        self.selected().map(|r| r.key.connection())
     }
 
     pub fn move_by(&mut self, delta: isize) {
@@ -281,7 +349,7 @@ impl TreeState {
     }
 
     /// Expands the node, or moves to its first child if already expanded.
-    pub fn expand(&mut self, dbs: &[DatabaseEntry]) {
+    pub fn expand(&mut self, servers: &[Server]) {
         let Some(row) = self.selected().cloned() else {
             return;
         };
@@ -289,7 +357,7 @@ impl TreeState {
             return;
         }
         if row.expanded {
-            // A database still loading has no child yet.
+            // A node still connecting / loading has no child yet.
             if self
                 .rows
                 .get(self.cursor + 1)
@@ -299,18 +367,18 @@ impl TreeState {
             }
         } else if self.filter.is_empty() {
             self.expanded.insert(row.key);
-            self.rebuild(dbs);
+            self.rebuild(servers);
         }
     }
 
     /// Collapses the node, or moves to its parent.
-    pub fn collapse(&mut self, dbs: &[DatabaseEntry]) {
+    pub fn collapse(&mut self, servers: &[Server]) {
         let Some(row) = self.selected().cloned() else {
             return;
         };
         if row.expanded && self.filter.is_empty() && !matches!(row.kind, RowKind::Object(_)) {
             self.expanded.remove(&row.key);
-            self.rebuild(dbs);
+            self.rebuild(servers);
             return;
         }
         if row.depth == 0 {
@@ -325,49 +393,53 @@ impl TreeState {
         }
     }
 
-    /// Toggles a folder (Enter on a database, schema or group).
-    pub fn toggle(&mut self, dbs: &[DatabaseEntry]) {
+    /// Toggles a folder (Enter on a connection, database, schema or group).
+    pub fn toggle(&mut self, servers: &[Server]) {
         match self.selected().map(|r| r.expanded) {
-            Some(true) => self.collapse(dbs),
-            Some(false) => self.expand(dbs),
+            Some(true) => self.collapse(servers),
+            Some(false) => self.expand(servers),
             None => {}
         }
     }
 
-    /// Collapses everything except the database under the cursor.
-    pub fn collapse_all(&mut self, dbs: &[DatabaseEntry]) {
+    /// Collapses everything below the connections, keeping the current
+    /// connection and database open.
+    pub fn collapse_all(&mut self, servers: &[Server]) {
+        let conn = self.selected_connection().map(str::to_string);
         let db = self.selected_database().map(str::to_string);
-        self.expanded.clear();
-        if let Some(d) = &db {
-            self.expanded.insert(NodeKey::Database(d.clone()));
-        }
-        self.rebuild(dbs);
-        if let Some(d) = db {
-            let key = NodeKey::Database(d);
-            if let Some(i) = self.rows.iter().position(|r| r.key == key) {
-                self.cursor = i;
-                self.scroll_into_view();
+        self.expanded
+            .retain(|k| matches!(k, NodeKey::Connection(_)));
+        let target = match (conn, db) {
+            (Some(c), Some(d)) => {
+                let key = NodeKey::Database(c, d);
+                self.expanded.insert(key.clone());
+                Some(key)
             }
+            (Some(c), None) => Some(NodeKey::Connection(c)),
+            _ => None,
+        };
+        self.rebuild(servers);
+        if let Some(key) = target {
+            self.select(&key);
         }
     }
 
     /// Expands the parents of `obj` and puts the cursor on it.
-    pub fn reveal(&mut self, dbs: &[DatabaseEntry], obj: &ObjectRef) {
-        self.expanded
-            .insert(NodeKey::Database(obj.database.clone()));
-        self.expanded
-            .insert(NodeKey::Schema(obj.database.clone(), obj.schema.clone()));
-        self.expanded.insert(NodeKey::Group(
+    pub fn reveal(&mut self, servers: &[Server], obj: &ObjectRef) {
+        let (c, d, s) = (
+            obj.connection.clone(),
             obj.database.clone(),
             obj.schema.clone(),
-            obj.kind.group(),
-        ));
-        self.rebuild(dbs);
-        let key = NodeKey::Object(obj.clone());
-        if let Some(i) = self.rows.iter().position(|r| r.key == key) {
-            self.cursor = i;
-            self.scroll_into_view();
-        }
+        );
+        self.expanded.insert(NodeKey::Connection(c.clone()));
+        self.expanded
+            .insert(NodeKey::Database(c.clone(), d.clone()));
+        self.expanded
+            .insert(NodeKey::Schema(c.clone(), d.clone(), s.clone()));
+        self.expanded
+            .insert(NodeKey::Group(c, d, s, obj.kind.group()));
+        self.rebuild(servers);
+        self.select(&NodeKey::Object(obj.clone()));
     }
 
     pub fn scroll_into_view(&mut self) {
@@ -382,6 +454,33 @@ impl TreeState {
     }
 }
 
+fn connection_note(s: &Server) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    match &s.state {
+        ConnState::Disconnected => {}
+        ConnState::Connecting(_) => {
+            parts.push(s.progress.clone().unwrap_or_else(|| "connexion…".into()))
+        }
+        ConnState::Connected => {
+            if let Some(i) = &s.info {
+                parts.push(format!("PostgreSQL {}", i.version));
+            }
+        }
+        ConnState::Failed(_) => parts.push("erreur".into()),
+        ConnState::Lost(_) => parts.push("déconnecté".into()),
+    }
+    if s.conn.tunnel_cmd.is_some() {
+        parts.push("tunnel".into());
+    }
+    if s.conn.read_only {
+        parts.push("RO".into());
+    }
+    if s.conn.is_production() {
+        parts.push("PROD".into());
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
 fn database_note(db: &DatabaseEntry) -> Option<String> {
     if !db.info.can_connect {
         Some("accès refusé".into())
@@ -394,20 +493,20 @@ fn database_note(db: &DatabaseEntry) -> Option<String> {
     }
 }
 
-fn object_row(database: &str, schema: &Schema, o: &crate::db::catalog::DbObject) -> TreeRow {
+fn object_row(connection: &str, database: &str, schema: &Schema, o: &DbObject) -> TreeRow {
     TreeRow::node(
-        NodeKey::Object(ObjectRef::new(database, &schema.name, o)),
+        NodeKey::Object(ObjectRef::new(connection, database, &schema.name, o)),
         RowKind::Object(o.kind),
-        3,
+        4,
         o.display_name(),
         false,
     )
 }
 
-/// Rows matching a fuzzy filter, across loaded databases: parents are shown
+/// Rows matching a fuzzy filter, across loaded catalogs: parents are shown
 /// expanded, empty branches hidden. A filter containing `.` is matched
 /// against `schema.object`.
-fn build_filtered(dbs: &[DatabaseEntry], query: &str) -> Vec<TreeRow> {
+fn build_filtered(servers: &[Server], query: &str) -> Vec<TreeRow> {
     let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
     let qualified = query.contains('.');
     let mut matcher = Matcher::new(nucleo_matcher::Config::DEFAULT);
@@ -415,78 +514,90 @@ fn build_filtered(dbs: &[DatabaseEntry], query: &str) -> Vec<TreeRow> {
     let mut indices = Vec::new();
     let mut rows = Vec::new();
 
-    for db in dbs {
-        let Some(catalog) = &db.catalog else { continue };
-        let mut db_rows = Vec::new();
-        for schema in &catalog.schemas {
-            let mut schema_rows = Vec::new();
-            for group in ObjectGroup::ALL {
-                let mut group_rows = Vec::new();
-                for (_, o) in schema.objects_in(group) {
-                    let haystack_text = if qualified {
-                        format!("{}.{}", schema.name, o.name)
-                    } else {
-                        o.name.clone()
-                    };
-                    indices.clear();
-                    let haystack = Utf32Str::new(&haystack_text, &mut buf);
-                    let Some(score) = pattern.indices(haystack, &mut matcher, &mut indices) else {
+    for s in servers {
+        let c = s.name();
+        let mut conn_rows = Vec::new();
+        for db in &s.databases {
+            let Some(catalog) = &db.catalog else { continue };
+            let mut db_rows = Vec::new();
+            for schema in &catalog.schemas {
+                let mut schema_rows = Vec::new();
+                for group in ObjectGroup::ALL {
+                    let mut group_rows = Vec::new();
+                    for (_, o) in schema.objects_in(group) {
+                        let haystack_text = if qualified {
+                            format!("{}.{}", schema.name, o.name)
+                        } else {
+                            o.name.clone()
+                        };
+                        indices.clear();
+                        let haystack = Utf32Str::new(&haystack_text, &mut buf);
+                        let Some(score) = pattern.indices(haystack, &mut matcher, &mut indices)
+                        else {
+                            continue;
+                        };
+                        let skip = if qualified {
+                            schema.name.chars().count() as u32 + 1
+                        } else {
+                            0
+                        };
+                        let mut highlights: Vec<usize> = indices
+                            .iter()
+                            .filter(|i| **i >= skip)
+                            .map(|i| (*i - skip) as usize)
+                            .collect();
+                        highlights.sort_unstable();
+                        highlights.dedup();
+                        let mut row = object_row(c, db.name(), schema, o);
+                        row.highlights = highlights;
+                        row.score = score;
+                        group_rows.push(row);
+                    }
+                    if group_rows.is_empty() {
                         continue;
-                    };
-                    let skip = if qualified {
-                        schema.name.chars().count() as u32 + 1
-                    } else {
-                        0
-                    };
-                    let mut highlights: Vec<usize> = indices
-                        .iter()
-                        .filter(|i| **i >= skip)
-                        .map(|i| (*i - skip) as usize)
-                        .collect();
-                    highlights.sort_unstable();
-                    highlights.dedup();
-                    let mut row = object_row(db.name(), schema, o);
-                    row.highlights = highlights;
-                    row.score = score;
-                    group_rows.push(row);
+                    }
+                    // Best matches first; the sort is stable, so ties keep name order.
+                    group_rows.sort_by_key(|r| std::cmp::Reverse(r.score));
+                    let key =
+                        NodeKey::Group(c.into(), db.name().into(), schema.name.clone(), group);
+                    let mut g =
+                        TreeRow::node(key, RowKind::Group(group), 3, group.label().into(), true);
+                    g.count = Some(group_rows.len());
+                    schema_rows.push(g);
+                    schema_rows.append(&mut group_rows);
                 }
-                if group_rows.is_empty() {
+                if schema_rows.is_empty() {
                     continue;
                 }
-                // Best matches first; the sort is stable, so ties keep name order.
-                group_rows.sort_by_key(|r| std::cmp::Reverse(r.score));
-                let key = NodeKey::Group(db.name().into(), schema.name.clone(), group);
-                let mut g =
-                    TreeRow::node(key, RowKind::Group(group), 2, group.label().into(), true);
-                g.count = Some(group_rows.len());
-                schema_rows.push(g);
-                schema_rows.append(&mut group_rows);
+                let key = NodeKey::Schema(c.into(), db.name().into(), schema.name.clone());
+                db_rows.push(TreeRow::node(
+                    key,
+                    RowKind::Schema,
+                    2,
+                    schema.name.clone(),
+                    true,
+                ));
+                db_rows.append(&mut schema_rows);
             }
-            if schema_rows.is_empty() {
+            if db_rows.is_empty() {
                 continue;
             }
-            let key = NodeKey::Schema(db.name().into(), schema.name.clone());
-            db_rows.push(TreeRow::node(
+            let key = NodeKey::Database(c.into(), db.name().into());
+            conn_rows.push(TreeRow::node(
                 key,
-                RowKind::Schema,
+                RowKind::Database,
                 1,
-                schema.name.clone(),
+                db.name().into(),
                 true,
             ));
-            db_rows.append(&mut schema_rows);
+            conn_rows.append(&mut db_rows);
         }
-        if db_rows.is_empty() {
+        if conn_rows.is_empty() {
             continue;
         }
-        let key = NodeKey::Database(db.name().into());
-        rows.push(TreeRow::node(
-            key,
-            RowKind::Database,
-            0,
-            db.name().into(),
-            true,
-        ));
-        rows.append(&mut db_rows);
+        let key = NodeKey::Connection(c.into());
+        rows.push(TreeRow::node(key, RowKind::Connection, 0, c.into(), true));
+        rows.append(&mut conn_rows);
     }
     rows
 }

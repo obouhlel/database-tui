@@ -26,17 +26,14 @@ impl App {
         let Some(obj) = self.current.clone().filter(|o| o.kind.has_rows()) else {
             return Vec::new();
         };
-        let Some(session) = &self.session else {
+        let Some(server) = self.server(&obj.connection).filter(|s| s.is_connected()) else {
             return Vec::new();
         };
-        if session.lost.is_some() {
-            return Vec::new();
-        }
         if !self.data.is_for(&obj) {
-            let Some(DetailsState::Loaded(d)) = session.details.get(&obj) else {
+            let Some(DetailsState::Loaded(d)) = server.details.get(&obj) else {
                 return Vec::new();
             };
-            self.data = DataView::new(d, self.config.general.page_size, session.conn.read_only);
+            self.data = DataView::new(d, self.config.general.page_size, server.conn.read_only);
             self.dirty = true;
         }
 
@@ -417,13 +414,19 @@ impl App {
         self.data.loading.take()?;
         self.notify(Level::Warning, "Annulation de la requête demandée");
         self.data.error = Some("requête annulée".into());
-        let database = self
+        let (connection, database) = self
             .data
             .object
             .as_ref()
-            .map(|o| o.database.clone())
+            .map(|o| (o.connection.clone(), o.database.clone()))
             .unwrap_or_default();
-        Some(vec![DbCommand::Cancel { database }.into()])
+        Some(vec![
+            DbCommand::Cancel {
+                connection,
+                database,
+            }
+            .into(),
+        ])
     }
 
     /// Visible rows / total, for the status bar.

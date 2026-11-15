@@ -121,6 +121,8 @@ impl Schema {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Catalog {
+    /// Connection (server) the database belongs to.
+    pub connection: String,
     /// Database these schemas belong to.
     pub database: String,
     pub schemas: Vec<Schema>,
@@ -145,6 +147,8 @@ pub struct DatabaseInfo {
 /// Stable reference to an object (survives catalog reloads).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ObjectRef {
+    /// Connection (server) holding the object: several can be open at once.
+    pub connection: String,
     /// Database holding the object (a server has several).
     pub database: String,
     pub schema: String,
@@ -154,8 +158,9 @@ pub struct ObjectRef {
 }
 
 impl ObjectRef {
-    pub fn new(database: &str, schema: &str, obj: &DbObject) -> Self {
+    pub fn new(connection: &str, database: &str, schema: &str, obj: &DbObject) -> Self {
         Self {
+            connection: connection.to_string(),
             database: database.to_string(),
             schema: schema.to_string(),
             name: obj.name.clone(),

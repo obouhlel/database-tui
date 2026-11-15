@@ -145,6 +145,7 @@ mod tests {
     fn req() -> DataRequest {
         DataRequest {
             object: ObjectRef {
+                connection: "test".into(),
                 database: "demo".into(),
                 schema: "shop".into(),
                 name: "Order Items".into(),

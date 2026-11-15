@@ -1,6 +1,7 @@
 use super::*;
-use crate::db::BackendKind;
+use crate::config::ConnectionConfig;
 use crate::db::catalog::{Catalog, DbObject, ObjectKind, Schema};
+use crate::db::{BackendKind, ServerInfo};
 use crossterm::event::KeyModifiers;
 use pretty_assertions::assert_eq;
 
@@ -67,7 +68,7 @@ fn info() -> ServerInfo {
     }
 }
 
-fn catalog() -> Catalog {
+fn catalog_for(connection: &str) -> Catalog {
     let table = |n: &str| DbObject {
         name: n.into(),
         kind: ObjectKind::Table,
@@ -75,6 +76,7 @@ fn catalog() -> Catalog {
         signature: None,
     };
     Catalog {
+        connection: connection.into(),
         database: "demo".into(),
         schemas: vec![Schema {
             name: "public".into(),
@@ -85,21 +87,30 @@ fn catalog() -> Catalog {
     }
 }
 
-/// Picker -> connected -> catalog loaded.
-fn connected_app() -> App {
-    let mut app = app_with(&["local"], None);
-    key(&mut app, "enter");
-    let cmds = db(app.update(Msg::Db(DbEvent::Connected {
+fn catalog() -> Catalog {
+    catalog_for("local")
+}
+
+fn connected(connection: &str) -> Msg {
+    Msg::Db(DbEvent::Connected {
+        connection: connection.into(),
         info: info(),
         databases: vec![],
         elapsed: Duration::from_millis(5),
-    })));
+    })
+}
+
+/// Tree -> Enter on the connection -> connected -> catalog loaded.
+fn connected_app() -> App {
+    let mut app = app_with(&["local"], None);
+    let cmds = key(&mut app, "enter");
+    assert!(
+        matches!(cmds.as_slice(), [DbCommand::Connect { request, resolve_password: true }] if request.conn.name == "local")
+    );
+    let cmds = db(app.update(connected("local")));
     assert!(matches!(
         cmds.as_slice(),
-        [DbCommand::LoadCatalog {
-            include_system: false,
-            ..
-        }]
+        [DbCommand::LoadCatalog { connection, database, include_system: false }] if connection == "local" && database == "demo"
     ));
     app.update(Msg::Db(DbEvent::CatalogLoaded {
         catalog: catalog(),
@@ -109,19 +120,27 @@ fn connected_app() -> App {
 }
 
 #[test]
-fn picker_preselects_default_connection() {
-    let app = app_with(&["a", "b", "c"], Some("b"));
-    assert_eq!(app.picker_cursor, 1);
-    assert_eq!(app.screen, Screen::Picker);
+fn starts_on_the_tree_without_connecting() {
+    let mut app = app_with(&["a", "b", "c"], Some("b"));
+    assert_eq!(app.screen, Screen::Main);
+    assert_eq!(
+        app.tree.selected().unwrap().label,
+        "b",
+        "default connection selected"
+    );
+    let effects = db(app.init());
+    assert!(
+        effects
+            .iter()
+            .all(|c| matches!(c, DbCommand::Discover { .. })),
+        "{effects:?}"
+    );
 }
 
 #[test]
-fn picker_navigation_and_connect() {
+fn enter_on_a_connection_connects_it() {
     let mut app = app_with(&["a", "b"], None);
     key(&mut app, "j");
-    assert_eq!(app.picker_cursor, 1);
-    key(&mut app, "j");
-    assert_eq!(app.picker_cursor, 1, "clamped");
     let cmds = key(&mut app, "enter");
     match cmds.as_slice() {
         [
@@ -132,17 +151,56 @@ fn picker_navigation_and_connect() {
         ] => assert_eq!(request.conn.name, "b"),
         other => panic!("unexpected {other:?}"),
     }
-    assert!(app.connecting.is_some());
-    // A second Enter while connecting does nothing.
+    assert!(matches!(
+        app.server("b").unwrap().state,
+        server::ConnState::Connecting(_)
+    ));
+    assert_eq!(app.tree.rows[1].note.as_deref(), Some("connexion…"));
+    // A second Enter while connecting does not connect again.
     assert!(key(&mut app, "enter").is_empty());
 }
 
 #[test]
 fn connect_then_catalog() {
     let app = connected_app();
-    assert_eq!(app.screen, Screen::Main);
-    assert!(app.connecting.is_none());
-    assert_eq!(app.tree.rows.len(), 5); // demo, public, Tables, customers, orders
+    assert!(app.server("local").unwrap().is_connected());
+    // local, demo, public, Tables, customers, orders
+    assert_eq!(app.tree.rows.len(), 6);
+}
+
+#[test]
+fn two_connections_open_at_once() {
+    let mut app = app_with(&["a", "b"], None);
+    key(&mut app, "enter");
+    app.update(connected("a"));
+    app.update(Msg::Db(DbEvent::CatalogLoaded {
+        catalog: catalog_for("a"),
+        elapsed: Duration::ZERO,
+    }));
+    key(&mut app, "G");
+    assert_eq!(app.tree.selected().unwrap().label, "b");
+    let cmds = key(&mut app, "enter");
+    assert!(
+        matches!(cmds.as_slice(), [DbCommand::Connect { request, .. }] if request.conn.name == "b")
+    );
+    app.update(connected("b"));
+    app.update(Msg::Db(DbEvent::CatalogLoaded {
+        catalog: catalog_for("b"),
+        elapsed: Duration::ZERO,
+    }));
+    assert!(app.server("a").unwrap().is_connected() && app.server("b").unwrap().is_connected());
+    let roots: Vec<_> = app
+        .tree
+        .rows
+        .iter()
+        .filter(|r| r.depth == 0)
+        .map(|r| r.label.as_str())
+        .collect();
+    assert_eq!(roots, ["a", "b"]);
+    assert_eq!(
+        app.tree.rows.iter().filter(|r| r.label == "orders").count(),
+        2
+    );
 }
 
 #[test]
@@ -150,6 +208,7 @@ fn password_prompt_flow() {
     let mut app = app_with(&["local"], None);
     key(&mut app, "enter");
     app.update(Msg::Db(DbEvent::ConnectFailed {
+        connection: "local".into(),
         error: "password missing".into(),
         password_required: true,
     }));
@@ -171,17 +230,65 @@ fn password_prompt_flow() {
 }
 
 #[test]
-fn connect_error_shows_popup_and_stays_on_picker() {
+fn connect_error_shows_popup_and_enter_retries() {
     let mut app = app_with(&["local"], None);
     key(&mut app, "enter");
     app.update(Msg::Db(DbEvent::ConnectFailed {
+        connection: "local".into(),
         error: "refused".into(),
         password_required: false,
     }));
     assert!(matches!(app.overlay, Some(Overlay::Error { .. })));
-    assert_eq!(app.screen, Screen::Picker);
+    assert_eq!(app.tree.rows[0].note.as_deref(), Some("erreur"));
     key(&mut app, "esc");
     assert!(app.overlay.is_none());
+    assert!(matches!(
+        key(&mut app, "enter").as_slice(),
+        [DbCommand::Connect { .. }]
+    ));
+}
+
+#[test]
+fn disconnect_and_delete() {
+    let mut app = connected_app();
+    key(&mut app, "G enter"); // open orders
+    key(&mut app, "ctrl+h gg");
+    let cmds = key(&mut app, "X");
+    assert!(
+        matches!(cmds.as_slice(), [DbCommand::Disconnect { connection }] if connection == "local")
+    );
+    assert!(
+        app.current.is_none(),
+        "objects of the closed connection are closed"
+    );
+    assert_eq!(app.tree.rows.len(), 1);
+
+    let effects = key_effects(&mut app, "d d");
+    assert!(effects.is_empty());
+    assert!(matches!(app.overlay, Some(Overlay::ConfirmDelete(ref n)) if n == "local"));
+    let effects = key_effects(&mut app, "o");
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::DeleteConnection(n) if n == "local")),
+        "{effects:?}"
+    );
+    assert!(app.servers.is_empty() && app.tree.rows.is_empty());
+}
+
+#[test]
+fn connections_page_opens_with_ctrl_n() {
+    let mut app = app_with(&["a"], None);
+    key(&mut app, "ctrl+n");
+    assert_eq!(app.screen, Screen::Picker);
+    key(&mut app, "esc");
+    assert_eq!(app.screen, Screen::Main);
+    key(&mut app, "ctrl+n");
+    let cmds = key(&mut app, "enter");
+    assert_eq!(app.screen, Screen::Main);
+    assert!(
+        matches!(cmds.as_slice(), [DbCommand::Connect { request, .. }] if request.conn.name == "a")
+    );
 }
 
 #[test]
@@ -192,6 +299,10 @@ fn open_object_focuses_center() {
     assert_eq!(
         app.current.as_ref().map(|o| o.name.as_str()),
         Some("orders")
+    );
+    assert_eq!(
+        app.current.as_ref().map(|o| o.connection.as_str()),
+        Some("local")
     );
     assert_eq!(app.focus, Focus::Center);
     key(&mut app, "ctrl+h");
@@ -204,14 +315,14 @@ fn tree_filter() {
     key(&mut app, "/");
     assert_eq!(app.mode(), Mode::Filter);
     typed(&mut app, "cus");
-    assert_eq!(app.tree.rows.len(), 4); // demo, public, Tables, customers
+    assert_eq!(app.tree.rows.len(), 5); // local, demo, public, Tables, customers
     assert_eq!(app.tree.selected().unwrap().label, "customers");
     // `q` is text while filtering, not quit.
     typed(&mut app, "q");
     assert!(!app.should_quit);
     key(&mut app, "esc");
     assert_eq!(app.mode(), Mode::Normal);
-    assert_eq!(app.tree.rows.len(), 5);
+    assert_eq!(app.tree.rows.len(), 6);
 }
 
 #[test]
@@ -254,31 +365,36 @@ fn ctrl_c_does_not_quit() {
 }
 
 #[test]
-fn connection_lost_blocks_reload() {
+fn connection_lost_then_reconnect() {
     let mut app = connected_app();
-    app.update(Msg::Db(DbEvent::ConnectionLost("eof".into())));
-    assert!(app.session.as_ref().unwrap().lost.is_some());
-    assert!(key(&mut app, "R").is_empty());
+    app.update(Msg::Db(DbEvent::ConnectionLost {
+        connection: "local".into(),
+        message: "eof".into(),
+    }));
+    assert!(matches!(
+        app.server("local").unwrap().state,
+        server::ConnState::Lost(_)
+    ));
+    assert!(
+        key(&mut app, "R").is_empty(),
+        "nothing to reload on a lost connection"
+    );
+    key(&mut app, "gg");
+    assert!(matches!(
+        key(&mut app, "enter").as_slice(),
+        [DbCommand::Connect { .. }]
+    ));
 }
 
 #[test]
-fn reconnect_keeps_tree_state() {
+fn reconnect_reloads_catalogs() {
     let mut app = connected_app();
-    key(&mut app, "G");
     key(&mut app, ":");
     typed(&mut app, "reconnect");
     let cmds = key(&mut app, "enter");
     assert!(matches!(cmds.as_slice(), [DbCommand::Connect { .. }]));
-    app.update(Msg::Db(DbEvent::Connected {
-        info: info(),
-        databases: vec![],
-        elapsed: Duration::ZERO,
-    }));
-    assert!(
-        app.catalog("demo").is_some(),
-        "catalog kept while reloading"
-    );
-    assert_eq!(app.tree.selected().unwrap().label, "orders");
+    let cmds = db(app.update(connected("local")));
+    assert!(matches!(cmds.as_slice(), [DbCommand::LoadCatalog { .. }]));
 }
 
 // ------------------------------------------------------------ Data tab
@@ -549,6 +665,8 @@ mod discovery {
         let effects = db(app.init());
         assert!(matches!(effects.as_slice(), [DbCommand::Discover { ports }] if ports == &[5432]));
         assert!(app.discovering);
+        key(&mut app, "ctrl+n");
+        assert_eq!(app.screen, Screen::Picker);
         app.update(Msg::Db(DbEvent::Discovered(vec![DiscoveredServer {
             host: "127.0.0.1".into(),
             port: 5432,
@@ -581,6 +699,7 @@ mod discovery {
 
         // Wrong password: the form comes back with the error, password cleared.
         app.update(Msg::Db(DbEvent::ConnectFailed {
+            connection: "localhost".into(),
             error: "password authentication failed".into(),
             password_required: true,
         }));
@@ -596,6 +715,7 @@ mod discovery {
         let mut i = info();
         i.database = "postgres".into();
         app.update(Msg::Db(DbEvent::Connected {
+            connection: "localhost".into(),
             info: i,
             databases: vec![dbinfo("demo"), dbinfo("postgres"), dbinfo("shop")],
             elapsed: Duration::ZERO,
@@ -605,9 +725,9 @@ mod discovery {
         assert!(
             matches!(effects.as_slice(), [Effect::SaveConnection(c)] if c.password.is_none() && c.name == "localhost")
         );
-        assert_eq!(app.connections.len(), 2);
+        assert_eq!(app.servers.len(), 2);
+        assert!(app.server("localhost").unwrap().saved);
 
-        // The connected database comes first, then the others by name.
         let roots: Vec<_> = app
             .tree
             .rows
@@ -615,7 +735,16 @@ mod discovery {
             .filter(|r| r.depth == 0)
             .map(|r| r.label.clone())
             .collect();
-        assert_eq!(roots, ["postgres", "demo", "shop"]);
+        assert_eq!(roots, ["local", "localhost"]);
+        // The connected database comes first, then the others by name.
+        let dbs: Vec<_> = app
+            .tree
+            .rows
+            .iter()
+            .filter(|r| r.depth == 1 && r.key.connection() == "localhost")
+            .map(|r| r.label.clone())
+            .collect();
+        assert_eq!(dbs, ["postgres", "demo", "shop"]);
     }
 
     #[test]
@@ -623,6 +752,7 @@ mod discovery {
         let mut app = app_with(&["local"], None);
         key(&mut app, "enter");
         let effects = db(app.update(Msg::Db(DbEvent::Connected {
+            connection: "local".into(),
             info: info(),
             databases: vec![dbinfo("demo"), dbinfo("other")],
             elapsed: Duration::ZERO,
