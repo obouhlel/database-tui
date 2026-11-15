@@ -5,6 +5,7 @@
 use async_trait::async_trait;
 
 use super::catalog::{Catalog, ObjectRef};
+use super::data::{DataRequest, RowCount, TextRows};
 use super::schema::ObjectDetails;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,4 +43,14 @@ pub trait Backend: Send + Sync {
 
     /// Columns, indexes, constraints, DDL, ... of one object.
     async fn object_details(&self, object: &ObjectRef) -> anyhow::Result<ObjectDetails>;
+
+    /// One window of rows, every value as text (session connection).
+    async fn fetch_rows(&self, req: &DataRequest) -> anyhow::Result<TextRows>;
+
+    /// Number of rows matching the request's filter, counting at most
+    /// `bound + 1` rows (catalog connection, never blocks the session).
+    async fn count_rows(&self, req: &DataRequest, bound: u64) -> anyhow::Result<RowCount>;
+
+    /// Asks the server to cancel the query running on the session connection.
+    async fn cancel(&self) -> anyhow::Result<()>;
 }

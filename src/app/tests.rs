@@ -276,3 +276,248 @@ fn reconnect_keeps_tree_state() {
     );
     assert_eq!(app.tree.selected().unwrap().label, "orders");
 }
+
+// ------------------------------------------------------------ Data tab
+
+mod data_tab {
+    use super::*;
+    use crate::db::data::{Op, RowCount, TextRows};
+    use crate::db::schema::{Column, ObjectDetails};
+    use pretty_assertions::assert_eq;
+
+    fn column(name: &str, ty: &str, pk: bool) -> Column {
+        Column {
+            name: name.into(),
+            data_type: ty.into(),
+            nullable: !pk,
+            default: None,
+            identity: None,
+            generated: None,
+            collation: None,
+            comment: None,
+            primary_key: pk,
+            references: None,
+        }
+    }
+
+    fn fetches(effects: &[Effect]) -> Vec<(u64, u64, u64)> {
+        effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Db(DbCommand::FetchRows { id, request }) => {
+                    Some((*id, request.offset, request.limit))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn count_id(effects: &[Effect]) -> Option<u64> {
+        effects.iter().find_map(|e| match e {
+            Effect::Db(DbCommand::CountRows { id, .. }) => Some(*id),
+            _ => None,
+        })
+    }
+
+    fn rows(offset: u64, n: u64) -> TextRows {
+        TextRows {
+            columns: vec!["id".into(), "status".into(), "xmin".into()],
+            rows: (offset..offset + n)
+                .map(|i| {
+                    vec![
+                        Some(i.to_string()),
+                        (i % 3 != 0).then(|| format!("s{i}")),
+                        Some("1".into()),
+                    ]
+                })
+                .collect(),
+        }
+    }
+
+    /// Opens `orders` on the Data tab and answers the first fetch with
+    /// `total` rows in pages of 200.
+    fn data_app(total: u64) -> App {
+        let mut app = connected_app();
+        key(&mut app, "2");
+        let effects = key_effects(&mut app, "G enter");
+        let obj = match db(effects).as_slice() {
+            [DbCommand::LoadDetails(o)] => o.clone(),
+            other => panic!("expected details request, got {other:?}"),
+        };
+        let effects = app.update(Msg::Db(DbEvent::DetailsLoaded {
+            details: Box::new(ObjectDetails {
+                object: obj,
+                owner: None,
+                comment: None,
+                columns: vec![
+                    column("id", "bigint", true),
+                    column("status", "text", false),
+                ],
+                indexes: vec![],
+                constraints: vec![],
+                triggers: vec![],
+                foreign_keys: vec![],
+                referenced_by: vec![],
+                stats: None,
+                properties: vec![],
+                ddl: String::new(),
+            }),
+            elapsed: Duration::ZERO,
+        }));
+        let f = fetches(&effects);
+        assert_eq!(f.len(), 1, "{effects:?}");
+        let (id, offset, limit) = f[0];
+        assert_eq!(offset, 0);
+        let cid = count_id(&effects).expect("count requested");
+        app.update(Msg::Db(DbEvent::RowsLoaded {
+            id,
+            offset,
+            rows: rows(0, limit.min(total)),
+            elapsed: Duration::ZERO,
+        }));
+        app.update(Msg::Db(DbEvent::RowsCounted {
+            id: cid,
+            count: RowCount::Exact(total),
+        }));
+        app.data.grid.viewport_rows = 20;
+        app
+    }
+
+    #[test]
+    fn opening_loads_first_page_and_count() {
+        let app = data_app(1000);
+        assert_eq!(app.data.rows.len(), 200);
+        assert_eq!(app.data_position().as_deref(), Some("ligne 1 / 1 000"));
+        assert_eq!(app.mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn scrolling_near_the_end_loads_next_page() {
+        let mut app = data_app(1000);
+        let mut effects = Vec::new();
+        // 15 half pages: the window end (row 200) comes within the
+        // look-ahead (a quarter page) of the visible rows.
+        for _ in 0..15 {
+            effects.extend(key_effects(&mut app, "ctrl+d"));
+        }
+        assert_eq!(
+            fetches(&effects).iter().map(|f| f.1).collect::<Vec<_>>(),
+            [200]
+        );
+    }
+
+    #[test]
+    fn jump_to_end_and_cancel() {
+        let mut app = data_app(100_000);
+        let effects = key_effects(&mut app, "G");
+        let f = fetches(&effects);
+        assert_eq!(f.len(), 1);
+        assert!(f[0].1 > 99_000, "loads the tail: {f:?}");
+        assert_eq!(app.data.grid.row, 99_999);
+        let effects = key_effects(&mut app, "ctrl+c");
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::Db(DbCommand::Cancel)))
+        );
+        assert!(app.data.error.is_some());
+    }
+
+    #[test]
+    fn sort_and_filter_requery() {
+        let mut app = data_app(1000);
+        key(&mut app, "l");
+        let effects = key_effects(&mut app, "s");
+        let f = fetches(&effects);
+        assert_eq!(f.len(), 1);
+        assert_eq!(app.data.sort[0].column, "status");
+        assert!(count_id(&effects).is_some(), "recount after query change");
+
+        key(&mut app, "f");
+        assert_eq!(app.mode(), Mode::Filter);
+        typed(&mut app, "s4");
+        let effects = key_effects(&mut app, "enter");
+        assert_eq!(fetches(&effects).len(), 1);
+        assert_eq!(app.data.filter.conditions[0].column, "status");
+        assert_eq!(app.data.filter.conditions[0].op, Op::Eq);
+        assert_eq!(app.data.filter.conditions[0].value, "s4");
+
+        key(&mut app, "F");
+        typed(&mut app, "id > 5");
+        key(&mut app, "enter");
+        assert_eq!(app.data.filter.free_where.as_deref(), Some("id > 5"));
+        key(&mut app, "C");
+        assert!(app.data.filter.is_empty());
+    }
+
+    #[test]
+    fn search_copy_and_detail() {
+        let mut app = data_app(1000);
+        key(&mut app, "/");
+        assert_eq!(app.mode(), Mode::Search);
+        typed(&mut app, "s14");
+        key(&mut app, "enter");
+        assert_eq!((app.data.grid.row, app.data.grid.col), (14, 1));
+        key(&mut app, "n");
+        assert_eq!(app.data.grid.row, 140);
+
+        // yy: whole row; Y + j: JSON of the current row.
+        let effects = key_effects(&mut app, "y y");
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::Copy(t) if t == "140\ts140")),
+            "{effects:?}"
+        );
+        key(&mut app, "Y");
+        let effects = key_effects(&mut app, "j");
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::Copy(t) if t.contains("\"status\": \"s140\"")))
+        );
+
+        // Visual line selection over 3 rows, copied as TSV.
+        key(&mut app, "V j j");
+        assert_eq!(app.mode(), Mode::VisualLine);
+        key(&mut app, "y");
+        app.update(Msg::Tick); // `y` waits for a possible `yy`
+        std::thread::sleep(crate::keymap::SEQUENCE_TIMEOUT);
+        let effects = app.update(Msg::Tick);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::Copy(t) if t.lines().count() == 3)),
+            "{effects:?}"
+        );
+        assert_eq!(app.mode(), Mode::Normal, "selection ends after copy");
+
+        key(&mut app, "enter");
+        assert!(matches!(app.overlay, Some(Overlay::RowDetail { .. })));
+        key(&mut app, "]");
+        assert_eq!(app.data.grid.row, 143);
+        key(&mut app, "esc");
+        assert!(app.overlay.is_none());
+    }
+
+    #[test]
+    fn stale_pages_are_ignored_after_requery() {
+        let mut app = data_app(1000);
+        let first = fetches(&key_effects(&mut app, "s"))[0].0;
+        let second = fetches(&key_effects(&mut app, "s"))[0].0;
+        app.update(Msg::Db(DbEvent::RowsLoaded {
+            id: first,
+            offset: 0,
+            rows: rows(500, 5),
+            elapsed: Duration::ZERO,
+        }));
+        assert!(app.data.rows.is_empty(), "stale page dropped");
+        app.update(Msg::Db(DbEvent::RowsLoaded {
+            id: second,
+            offset: 0,
+            rows: rows(0, 200),
+            elapsed: Duration::ZERO,
+        }));
+        assert_eq!(app.data.rows.len(), 200);
+    }
+}

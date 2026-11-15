@@ -34,7 +34,10 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
                 left.push(Span::raw(format!(" {schema} ")));
             }
             left.push(sep(app));
-            left.push(Span::raw(" lignes — "));
+            left.push(Span::raw(format!(
+                " {} ",
+                app.data_position().unwrap_or_else(|| "—".into())
+            )));
             if let Some(op) = &app.last_op {
                 left.push(sep(app));
                 left.push(Span::raw(format!(
@@ -63,6 +66,8 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
         Mode::Normal => t.accent,
         Mode::Filter => t.warning,
         Mode::Command => t.success,
+        Mode::Search => t.matched,
+        Mode::Visual | Mode::VisualLine => t.schema,
     };
     left.insert(0, badge(&format!(" {} ", mode.label()), mode_color));
 
@@ -146,6 +151,27 @@ pub fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
                 (hint(Context::Global, Action::FocusCenter), "panneau"),
                 (hint(Context::Tree, Action::ReloadCatalog), "recharger"),
                 (hint(Context::Global, Action::CommandPalette), "commande"),
+                (hint(Context::Global, Action::Help), "aide"),
+                (hint(Context::Global, Action::Quit), "quitter"),
+            ],
+            (Screen::Main, Focus::Center)
+                if app.tab == crate::app::Tab::Data && app.data.visual.is_some() =>
+            {
+                vec![
+                    (hint(Context::Data, Action::Copy), "copier (TSV)"),
+                    (hint(Context::Data, Action::CopyAs), "copier comme…"),
+                    (hint(Context::Data, Action::Cancel), "annuler la sélection"),
+                ]
+            }
+            (Screen::Main, Focus::Center) if app.tab == crate::app::Tab::Data => vec![
+                (hint(Context::Data, Action::Detail), "détail"),
+                (hint(Context::Data, Action::Search), "chercher"),
+                (hint(Context::Data, Action::FilterEditor), "filtrer"),
+                (hint(Context::Data, Action::FreeWhere), "WHERE"),
+                (hint(Context::Data, Action::Sort), "trier"),
+                (hint(Context::Data, Action::Copy), "copier"),
+                (hint(Context::Data, Action::Visual), "sélection"),
+                (hint(Context::Data, Action::HideColumn), "masquer col."),
                 (hint(Context::Global, Action::Help), "aide"),
                 (hint(Context::Global, Action::Quit), "quitter"),
             ],

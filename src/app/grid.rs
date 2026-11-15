@@ -56,6 +56,10 @@ pub trait GridSource {
     fn frozen(&self) -> usize {
         0
     }
+    /// Numbers are right-aligned.
+    fn right_aligned(&self, _col: usize) -> bool {
+        false
+    }
 }
 
 pub const MAX_COLUMN_WIDTH: u16 = 60;
@@ -144,6 +148,8 @@ pub struct GridState {
     pub row_offset: usize,
     /// First scrollable (non-frozen) column shown.
     pub col_offset: usize,
+    /// Cursor column (cell mode), in display order.
+    pub col: usize,
     /// Visible data rows, updated by the renderer.
     pub viewport_rows: usize,
 }

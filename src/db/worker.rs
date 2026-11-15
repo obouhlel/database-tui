@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use super::catalog::{Catalog, ObjectRef};
+use super::data::{DataRequest, RowCount, TextRows};
 use super::schema::ObjectDetails;
 use super::{Backend, ConnectError, ConnectRequest, ServerInfo};
 use crate::config::password;
@@ -24,6 +25,18 @@ pub enum DbCommand {
         include_system: bool,
     },
     LoadDetails(ObjectRef),
+    /// Fetch a window of rows; `id` is echoed back to discard stale results.
+    FetchRows {
+        id: u64,
+        request: Box<DataRequest>,
+    },
+    CountRows {
+        id: u64,
+        request: Box<DataRequest>,
+        bound: u64,
+    },
+    /// Cancel the query running on the session connection.
+    Cancel,
     Disconnect,
 }
 
@@ -48,6 +61,24 @@ pub enum DbEvent {
     },
     DetailsFailed {
         object: ObjectRef,
+        error: String,
+    },
+    RowsLoaded {
+        id: u64,
+        offset: u64,
+        rows: TextRows,
+        elapsed: Duration,
+    },
+    RowsFailed {
+        id: u64,
+        error: String,
+    },
+    RowsCounted {
+        id: u64,
+        count: RowCount,
+    },
+    CountFailed {
+        id: u64,
         error: String,
     },
     ConnectionLost(String),
@@ -174,6 +205,58 @@ async fn run(mut commands: UnboundedReceiver<DbCommand>, events: UnboundedSender
                     };
                     send(&events, ev);
                 });
+            }
+            DbCommand::FetchRows { id, request } => {
+                let Some(b) = backend.clone() else {
+                    send(
+                        &events,
+                        DbEvent::RowsFailed {
+                            id,
+                            error: "not connected".into(),
+                        },
+                    );
+                    continue;
+                };
+                let events = events.clone();
+                tokio::spawn(async move {
+                    let started = Instant::now();
+                    let ev = match b.fetch_rows(&request).await {
+                        Ok(rows) => DbEvent::RowsLoaded {
+                            id,
+                            offset: request.offset,
+                            rows,
+                            elapsed: started.elapsed(),
+                        },
+                        Err(e) => DbEvent::RowsFailed {
+                            id,
+                            error: format!("{e:#}"),
+                        },
+                    };
+                    send(&events, ev);
+                });
+            }
+            DbCommand::CountRows { id, request, bound } => {
+                let Some(b) = backend.clone() else { continue };
+                let events = events.clone();
+                tokio::spawn(async move {
+                    let ev = match b.count_rows(&request, bound).await {
+                        Ok(count) => DbEvent::RowsCounted { id, count },
+                        Err(e) => DbEvent::CountFailed {
+                            id,
+                            error: format!("{e:#}"),
+                        },
+                    };
+                    send(&events, ev);
+                });
+            }
+            DbCommand::Cancel => {
+                if let Some(b) = backend.clone() {
+                    tokio::spawn(async move {
+                        if let Err(e) = b.cancel().await {
+                            tracing::warn!("cancel failed: {e:#}");
+                        }
+                    });
+                }
             }
             DbCommand::Disconnect => {
                 generation.fetch_add(1, Ordering::SeqCst);

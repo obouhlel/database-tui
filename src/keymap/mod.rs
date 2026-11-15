@@ -24,15 +24,18 @@ pub enum Context {
     Center,
     /// Center panel, Schema tab.
     Schema,
+    /// Center panel, Data tab.
+    Data,
 }
 
 impl Context {
-    pub const ALL: [Context; 5] = [
+    pub const ALL: [Context; 6] = [
         Context::Global,
         Context::Picker,
         Context::Tree,
         Context::Center,
         Context::Schema,
+        Context::Data,
     ];
 
     pub fn name(self) -> &'static str {
@@ -42,6 +45,7 @@ impl Context {
             Context::Tree => "tree",
             Context::Center => "center",
             Context::Schema => "schema",
+            Context::Data => "data",
         }
     }
 
@@ -52,6 +56,7 @@ impl Context {
             Context::Tree => "Arbre des objets",
             Context::Center => "Panneau central",
             Context::Schema => "Onglet Schema",
+            Context::Data => "Onglet Data",
         }
     }
 
@@ -123,6 +128,29 @@ actions! {
     JumpBack => "jump_back", "Revenir à l'objet précédent";
     Copy => "copy", "Copier (DDL ou ligne)";
     Refresh => "refresh", "Recharger";
+    CellLeft => "cell_left", "Cellule à gauche";
+    CellRight => "cell_right", "Cellule à droite";
+    NextColumn => "next_column", "Colonne suivante";
+    PrevColumn => "prev_column", "Colonne précédente";
+    Detail => "detail", "Vue détail de la ligne";
+    Visual => "visual", "Sélection de cellules";
+    VisualLine => "visual_line", "Sélection de lignes";
+    CopyRow => "copy_row", "Copier la ligne (TSV)";
+    CopyAs => "copy_as", "Copier la sélection (TSV, CSV, JSON, INSERT)";
+    Search => "search", "Rechercher dans les valeurs chargées";
+    SearchNext => "search_next", "Occurrence suivante";
+    SearchPrev => "search_prev", "Occurrence précédente";
+    FilterEditor => "filter_editor", "Filtre par colonne";
+    FreeWhere => "free_where", "Filtre SQL libre (WHERE)";
+    ClearFilters => "clear_filters", "Effacer les filtres";
+    Sort => "sort", "Trier sur la colonne (asc, desc, aucun)";
+    ClearSort => "clear_sort", "Effacer le tri";
+    NarrowColumn => "narrow_column", "Rétrécir la colonne";
+    WidenColumn => "widen_column", "Élargir la colonne";
+    AutoWidth => "auto_width", "Largeur automatique";
+    HideColumn => "hide_column", "Masquer la colonne";
+    ShowColumns => "show_columns", "Réafficher les colonnes masquées";
+    Cancel => "cancel", "Quitter la sélection / la recherche";
 }
 
 #[derive(Debug, Clone)]
@@ -177,8 +205,35 @@ fn defaults() -> Vec<(Context, Action, &'static [&'static str])> {
         (Schema, JumpBack, &["ctrl+o", "backspace"]),
         (Schema, Copy, &["y"]),
         (Schema, Refresh, &["R"]),
+        (Data, CellLeft, &["h", "left"]),
+        (Data, CellRight, &["l", "right"]),
+        (Data, NextColumn, &["w"]),
+        (Data, PrevColumn, &["b"]),
+        (Data, FirstColumn, &["0", "^"]),
+        (Data, LastColumn, &["$"]),
+        (Data, Detail, &["enter"]),
+        (Data, Visual, &["v"]),
+        (Data, VisualLine, &["V"]),
+        (Data, Copy, &["y"]),
+        (Data, CopyRow, &["yy"]),
+        (Data, CopyAs, &["Y"]),
+        (Data, Search, &["/"]),
+        (Data, SearchNext, &["n"]),
+        (Data, SearchPrev, &["N"]),
+        (Data, FilterEditor, &["f"]),
+        (Data, FreeWhere, &["F"]),
+        (Data, ClearFilters, &["C"]),
+        (Data, Sort, &["s"]),
+        (Data, ClearSort, &["S"]),
+        (Data, NarrowColumn, &["<"]),
+        (Data, WidenColumn, &[">"]),
+        (Data, AutoWidth, &["="]),
+        (Data, HideColumn, &["-"]),
+        (Data, ShowColumns, &["+"]),
+        (Data, Refresh, &["R"]),
+        (Data, Cancel, &["esc"]),
     ];
-    for ctx in [Picker, Tree, Center, Schema] {
+    for ctx in [Picker, Tree, Center, Schema, Data] {
         v.extend([
             (ctx, Up, &["k", "up"][..]),
             (ctx, Down, &["j", "down"][..]),

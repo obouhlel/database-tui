@@ -3,6 +3,7 @@
 
 pub mod backend;
 pub mod catalog;
+pub mod data;
 pub mod postgres;
 pub mod schema;
 pub mod worker;

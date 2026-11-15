@@ -7,7 +7,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Wrap};
 
-use super::schema_view;
+use super::{data_view, schema_view};
 use crate::app::{App, Focus, Tab};
 
 pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -38,6 +38,12 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         && let Some(obj) = app.current.clone()
     {
         schema_view::draw(frame, app, &obj, inner);
+        return;
+    }
+    if app.tab == Tab::Data
+        && let Some(obj) = app.current.clone()
+    {
+        data_view::draw(frame, app, &obj, inner);
         return;
     }
 

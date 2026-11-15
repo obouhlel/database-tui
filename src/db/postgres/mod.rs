@@ -8,6 +8,7 @@
 mod catalog;
 pub mod ddl;
 mod details;
+pub mod query;
 mod tls;
 
 use std::sync::Arc;
@@ -19,6 +20,7 @@ use tokio_postgres::error::SqlState;
 
 use super::backend::{Backend, BackendKind, ServerInfo};
 use super::catalog::{Catalog, ObjectRef};
+use super::data::{DataRequest, RowCount, TextRows};
 use super::schema::ObjectDetails;
 use super::{ConnectError, ConnectRequest};
 use crate::config::SslMode;
@@ -27,10 +29,12 @@ use crate::config::SslMode;
 pub type OnConnectionLost = Arc<dyn Fn(String) + Send + Sync>;
 
 pub struct PgBackend {
-    #[allow(dead_code)] // used from milestone 3 on (data / SQL queries)
     session: Client,
     catalog: Client,
     info: ServerInfo,
+    /// Cancels the query running on the session connection.
+    cancel: tokio_postgres::CancelToken,
+    tls: tokio_postgres_rustls::MakeRustlsConnect,
 }
 
 impl PgBackend {
@@ -88,10 +92,14 @@ impl PgBackend {
             read_only = req.conn.read_only,
             "connected"
         );
+        let cancel = session.cancel_token();
+        let tls = tls::make_connector(&req.conn).map_err(ConnectError::Other)?;
         Ok(Self {
             session,
             catalog,
             info,
+            cancel,
+            tls,
         })
     }
 }
@@ -168,5 +176,73 @@ impl Backend for PgBackend {
 
     async fn object_details(&self, object: &ObjectRef) -> anyhow::Result<ObjectDetails> {
         details::load(&self.catalog, object).await
+    }
+
+    async fn fetch_rows(&self, req: &DataRequest) -> anyhow::Result<TextRows> {
+        let sql = query::select(req);
+        let rows = self
+            .session
+            .query(&sql.text, &params(&sql.params))
+            .await
+            .map_err(pg_error)?;
+        let mut columns: Vec<String> = req.columns.iter().map(|c| c.name.clone()).collect();
+        if req.with_row_version {
+            columns.push("xmin".into());
+        }
+        let rows = rows
+            .iter()
+            .map(|r| {
+                (0..r.len())
+                    .map(|i| r.get::<_, Option<String>>(i))
+                    .collect()
+            })
+            .collect();
+        Ok(TextRows { columns, rows })
+    }
+
+    async fn count_rows(&self, req: &DataRequest, bound: u64) -> anyhow::Result<RowCount> {
+        let sql = query::count(req, bound);
+        let n: i64 = self
+            .catalog
+            .query_one(&sql.text, &params(&sql.params))
+            .await
+            .map_err(pg_error)?
+            .get(0);
+        let n = n.max(0) as u64;
+        Ok(if n > bound {
+            RowCount::AtLeast(bound)
+        } else {
+            RowCount::Exact(n)
+        })
+    }
+
+    async fn cancel(&self) -> anyhow::Result<()> {
+        self.cancel.cancel_query(self.tls.clone()).await?;
+        Ok(())
+    }
+}
+
+fn params(values: &[String]) -> Vec<&(dyn tokio_postgres::types::ToSql + Sync)> {
+    values
+        .iter()
+        .map(|v| v as &(dyn tokio_postgres::types::ToSql + Sync))
+        .collect()
+}
+
+/// Server errors with their detail and hint, e.g. a syntax error in a free
+/// `WHERE` clause.
+fn pg_error(e: tokio_postgres::Error) -> anyhow::Error {
+    match e.as_db_error() {
+        Some(db) => {
+            let mut msg = db.message().to_string();
+            if let Some(d) = db.detail() {
+                msg.push_str(&format!(" ({d})"));
+            }
+            if let Some(h) = db.hint() {
+                msg.push_str(&format!(" — {h}"));
+            }
+            anyhow::anyhow!(msg)
+        }
+        None => e.into(),
     }
 }

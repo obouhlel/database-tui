@@ -3,6 +3,8 @@
 //! which the reducer needs for page-wise movements.
 
 mod center;
+mod data_popups;
+mod data_view;
 mod help;
 mod picker;
 mod popup;
@@ -73,6 +75,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Some(Overlay::Error { title, message }) => {
             popup::draw_error(frame, app, title, message, body)
         }
+        Some(Overlay::FilterEditor(e)) => data_popups::draw_filter_editor(frame, app, e, body),
+        Some(Overlay::CopyFormat { cursor }) => {
+            data_popups::draw_copy_format(frame, app, *cursor, body)
+        }
+        Some(Overlay::RowDetail { scroll }) => {
+            data_popups::draw_row_detail(frame, app, *scroll, body)
+        }
+        // Drawn inside the Data tab.
+        Some(Overlay::DataSearch { .. } | Overlay::FreeWhere(_)) => {}
         Some(Overlay::Command(_)) | None => {}
     }
 }

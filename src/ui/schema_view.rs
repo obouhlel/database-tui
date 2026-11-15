@@ -159,7 +159,14 @@ pub fn draw(frame: &mut Frame, app: &mut App, obj: &ObjectRef, area: Rect) {
         }
         Some(_) => {
             if let Some(table) = app.schema.table_mut() {
-                table_view::draw(frame, body_area, &table.grid, &mut table.state, &t, focused);
+                table_view::draw(
+                    frame,
+                    body_area,
+                    &table.grid,
+                    &mut table.state,
+                    &t,
+                    &table_view::Options::rows(focused),
+                );
             }
         }
         None => {}

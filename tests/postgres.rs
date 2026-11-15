@@ -603,3 +603,251 @@ async fn ddl_round_trip() {
         .unwrap();
     result.unwrap();
 }
+
+// ------------------------------------------------------------- milestone 3
+
+use pgtui::app::data_view::DataView;
+use pgtui::db::data::{Combinator, Condition, Filter, Op, RowCount, SortDir, SortKey};
+
+async fn data_view(
+    url: &str,
+    schema: &str,
+    name: &str,
+) -> (std::sync::Arc<dyn pgtui::db::Backend>, DataView) {
+    let backend = db::connect(&request(url), no_lost()).await.unwrap();
+    let d = backend
+        .object_details(&obj(schema, name, ObjectKind::Table))
+        .await
+        .unwrap();
+    (backend, DataView::new(&d, 200, false))
+}
+
+async fn raw_count(url: &str, sql: &str) -> i64 {
+    let (client, conn) = tokio_postgres::connect(url, tokio_postgres::NoTls)
+        .await
+        .unwrap();
+    tokio::spawn(conn);
+    client.query_one(sql, &[]).await.unwrap().get(0)
+}
+
+fn cond(column: &str, op: Op, value: &str) -> Condition {
+    Condition {
+        column: column.into(),
+        op,
+        value: value.into(),
+    }
+}
+
+#[tokio::test]
+async fn pages_in_key_order() {
+    let Some(url) = test_url() else { return };
+    let (b, v) = data_view(&url, "shop", "orders").await;
+    let p0 = b.fetch_rows(&v.request(0, 200)).await.unwrap();
+    assert_eq!(p0.rows.len(), 200);
+    assert_eq!(p0.columns.last().map(String::as_str), Some("xmin"));
+    assert_eq!(p0.columns.len(), 9);
+    let id_col = p0.columns.iter().position(|c| c == "id").unwrap();
+    assert_eq!(p0.rows[0][id_col].as_deref(), Some("1"));
+    let p1 = b.fetch_rows(&v.request(200, 200)).await.unwrap();
+    assert_eq!(p1.rows[0][id_col].as_deref(), Some("201"));
+    assert_eq!(
+        b.count_rows(&v.request(0, 0), 1_000_000).await.unwrap(),
+        RowCount::Exact(100_000)
+    );
+    assert_eq!(
+        b.count_rows(&v.request(0, 0), 1000).await.unwrap(),
+        RowCount::AtLeast(1000)
+    );
+}
+
+#[tokio::test]
+async fn structured_filters_match_hand_written_sql() {
+    let Some(url) = test_url() else { return };
+    let (b, mut v) = data_view(&url, "shop", "orders").await;
+    v.filter = Filter {
+        conditions: vec![
+            cond("status", Op::Eq, "paid"),
+            cond("total", Op::Gt, "100.5"),
+        ],
+        combinator: Combinator::And,
+        free_where: None,
+    };
+    let expected = raw_count(
+        &url,
+        "SELECT count(*) FROM shop.orders WHERE status = 'paid' AND total > 100.5",
+    )
+    .await;
+    assert_eq!(
+        b.count_rows(&v.request(0, 0), 1_000_000).await.unwrap(),
+        RowCount::Exact(expected as u64)
+    );
+
+    v.filter.combinator = Combinator::Or;
+    v.filter.free_where = Some("id < 50000".into());
+    let expected = raw_count(
+        &url,
+        "SELECT count(*) FROM shop.orders WHERE (status = 'paid' OR total > 100.5) AND (id < 50000)",
+    )
+    .await;
+    assert_eq!(
+        b.count_rows(&v.request(0, 0), 1_000_000).await.unwrap(),
+        RowCount::Exact(expected as u64)
+    );
+
+    // Sort: total desc then id.
+    v.filter = Filter::default();
+    v.sort = vec![SortKey {
+        column: "total".into(),
+        dir: SortDir::Desc,
+    }];
+    let rows = b.fetch_rows(&v.request(0, 2)).await.unwrap();
+    let total_col = rows.columns.iter().position(|c| c == "total").unwrap();
+    let max: String = {
+        let (client, conn) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+            .await
+            .unwrap();
+        tokio::spawn(conn);
+        client
+            .query_one("SELECT max(total)::text FROM shop.orders", &[])
+            .await
+            .unwrap()
+            .get(0)
+    };
+    assert_eq!(rows.rows[0][total_col].as_deref(), Some(max.as_str()));
+}
+
+#[tokio::test]
+async fn text_patterns_nulls_and_empty_strings() {
+    let Some(url) = test_url() else { return };
+    let (b, mut v) = data_view(&url, "shop", "customers").await;
+    let count = |v: &DataView| v.request(0, 0);
+
+    v.filter.conditions = vec![cond("full_name", Op::ILike, "%ZOÉ%")];
+    let expected = raw_count(
+        &url,
+        "SELECT count(*) FROM shop.customers WHERE full_name ILIKE '%zoé%'",
+    )
+    .await;
+    assert!(expected > 0);
+    assert_eq!(
+        b.count_rows(&count(&v), 1_000_000).await.unwrap(),
+        RowCount::Exact(expected as u64)
+    );
+
+    v.filter.conditions = vec![cond("email", Op::Regex, "^user1[0-9]@")];
+    assert_eq!(
+        b.count_rows(&count(&v), 1_000_000).await.unwrap(),
+        RowCount::Exact(10)
+    );
+
+    v.filter.conditions = vec![cond("notes", Op::IsNull, "")];
+    let nulls = raw_count(
+        &url,
+        "SELECT count(*) FROM shop.customers WHERE notes IS NULL",
+    )
+    .await;
+    assert_eq!(
+        b.count_rows(&count(&v), 1_000_000).await.unwrap(),
+        RowCount::Exact(nulls as u64)
+    );
+
+    // NULL and the empty string stay distinct.
+    v.filter.conditions = vec![cond("id", Op::Le, "3")];
+    let rows = b.fetch_rows(&v.request(0, 10)).await.unwrap();
+    let notes = rows.columns.iter().position(|c| c == "notes").unwrap();
+    let values: Vec<_> = rows.rows.iter().map(|r| r[notes].clone()).collect();
+    assert!(values.contains(&None), "{values:?}");
+    assert!(values.contains(&Some(String::new())), "{values:?}");
+
+    // Array, jsonb, inet, bytea come back as their text representation.
+    let tags = rows.columns.iter().position(|c| c == "tags").unwrap();
+    assert!(
+        rows.rows
+            .iter()
+            .any(|r| r[tags].as_deref().is_some_and(|t| t.starts_with('{')))
+    );
+}
+
+#[tokio::test]
+async fn values_cannot_inject_sql() {
+    let Some(url) = test_url() else { return };
+    let (b, mut v) = data_view(&url, "public", "settings").await;
+    v.filter.conditions = vec![cond("key", Op::Eq, "x'; DROP TABLE public.settings; --")];
+    let rows = b.fetch_rows(&v.request(0, 10)).await.unwrap();
+    assert!(rows.rows.is_empty());
+    assert_eq!(
+        raw_count(&url, "SELECT count(*) FROM public.settings").await,
+        4
+    );
+
+    // A value that is not valid for the column type is a clean error.
+    let (b, mut v) = data_view(&url, "shop", "orders").await;
+    v.filter.conditions = vec![cond("id", Op::Eq, "abc")];
+    let err = b
+        .fetch_rows(&v.request(0, 10))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("invalid input syntax for type bigint"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn free_where_errors_are_reported() {
+    let Some(url) = test_url() else { return };
+    let (b, mut v) = data_view(&url, "shop", "orders").await;
+    v.filter.free_where = Some("id <".into());
+    let err = b
+        .fetch_rows(&v.request(0, 10))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("syntax error"), "{err}");
+}
+
+#[tokio::test]
+async fn read_only_session_refuses_writes() {
+    let Some(url) = test_url() else { return };
+    let mut req = request(&url);
+    req.conn.read_only = true;
+    let b = db::connect(&req, no_lost()).await.unwrap();
+    let d = b
+        .object_details(&obj("shop", "orders", ObjectKind::Table))
+        .await
+        .unwrap();
+    let mut v = DataView::new(&d, 10, true);
+    assert!(
+        v.read_only_reason
+            .as_deref()
+            .unwrap()
+            .contains("lecture seule")
+    );
+    // nextval() writes: refused by default_transaction_read_only.
+    v.filter.free_where = Some("nextval('shop.invoice_number_seq') > 0".into());
+    let err = b
+        .fetch_rows(&v.request(0, 1))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("read-only transaction"), "{err}");
+}
+
+#[tokio::test]
+async fn long_query_can_be_cancelled() {
+    let Some(url) = test_url() else { return };
+    let (b, mut v) = data_view(&url, "public", "settings").await;
+    v.filter.free_where = Some("(SELECT pg_sleep(10)) IS NOT NULL".into());
+    let started = std::time::Instant::now();
+    let fetch = {
+        let b = b.clone();
+        let req = v.request(0, 10);
+        tokio::spawn(async move { b.fetch_rows(&req).await })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    b.cancel().await.unwrap();
+    let err = fetch.await.unwrap().unwrap_err().to_string();
+    assert!(err.contains("canceling statement"), "{err}");
+    assert!(started.elapsed() < Duration::from_secs(5));
+}

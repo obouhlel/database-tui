@@ -5,11 +5,16 @@
 //! clipboard writes) that the event loop executes. It performs no I/O, which
 //! keeps it unit-testable.
 
+mod data_tab;
+pub mod data_view;
+pub mod export;
+pub mod filter_editor;
 pub mod format;
 pub mod grid;
 pub mod input;
 pub mod schema_view;
 pub mod tree;
+pub mod value;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -24,6 +29,7 @@ use crate::db::worker::{DbCommand, DbEvent};
 use crate::db::{ConnectRequest, ServerInfo};
 use crate::keymap::{Action, Context, KeyChord, KeyResolver, Keymap, Resolved};
 use crate::ui::theme::Theme;
+use data_view::DataView;
 use input::{InputOutcome, LineInput};
 use schema_view::{SchemaView, Section};
 use tree::{RowKind, TreeState};
@@ -120,6 +126,9 @@ pub enum Mode {
     Normal,
     Filter,
     Command,
+    Search,
+    Visual,
+    VisualLine,
 }
 
 impl Mode {
@@ -128,6 +137,9 @@ impl Mode {
             Mode::Normal => "NORMAL",
             Mode::Filter => "FILTER",
             Mode::Command => "COMMAND",
+            Mode::Search => "SEARCH",
+            Mode::Visual => "VISUAL",
+            Mode::VisualLine => "V-LINE",
         }
     }
 }
@@ -163,6 +175,36 @@ pub enum Overlay {
         title: String,
         message: String,
     },
+    /// `/` in the Data tab; `previous` is restored on Esc.
+    DataSearch {
+        input: LineInput,
+        previous: Option<String>,
+    },
+    /// `F`: free SQL condition.
+    FreeWhere(LineInput),
+    /// `f`: structured filter.
+    FilterEditor(Box<filter_editor::FilterEditor>),
+    /// `Y`: format chooser.
+    CopyFormat {
+        cursor: usize,
+    },
+    /// `Enter`: all fields of the current row.
+    RowDetail {
+        scroll: u16,
+    },
+}
+
+impl Overlay {
+    fn is_data(&self) -> bool {
+        matches!(
+            self,
+            Overlay::DataSearch { .. }
+                | Overlay::FreeWhere(_)
+                | Overlay::FilterEditor(_)
+                | Overlay::CopyFormat { .. }
+                | Overlay::RowDetail { .. }
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -224,6 +266,8 @@ pub struct App {
     pub schema: SchemaView,
     /// Objects visited before the current one (Ctrl+o goes back).
     pub back_stack: Vec<ObjectRef>,
+    pub data: DataView,
+    request_seq: u64,
 
     pub overlay: Option<Overlay>,
     pub status: Option<StatusMessage>,
@@ -271,6 +315,8 @@ impl App {
             current: None,
             schema: SchemaView::default(),
             back_stack: Vec::new(),
+            data: DataView::default(),
+            request_seq: 0,
             overlay: None,
             status: None,
             busy: None,
@@ -298,7 +344,14 @@ impl App {
     pub fn mode(&self) -> Mode {
         match &self.overlay {
             Some(Overlay::Command(_)) => Mode::Command,
+            Some(Overlay::DataSearch { .. }) => Mode::Search,
+            Some(Overlay::FilterEditor(_) | Overlay::FreeWhere(_)) => Mode::Filter,
             _ if self.tree.filter_editing => Mode::Filter,
+            _ if self.tab == Tab::Data && self.focus == Focus::Center => match self.data.visual {
+                Some(v) if v.line => Mode::VisualLine,
+                Some(_) => Mode::Visual,
+                None => Mode::Normal,
+            },
             _ => Mode::Normal,
         }
     }
@@ -310,6 +363,9 @@ impl App {
             (Screen::Main, Focus::Tree) => Context::Tree,
             (Screen::Main, Focus::Center) if self.tab == Tab::Schema => {
                 return vec![Context::Schema, Context::Center, Context::Global];
+            }
+            (Screen::Main, Focus::Center) if self.tab == Tab::Data => {
+                return vec![Context::Data, Context::Center, Context::Global];
             }
             (Screen::Main, Focus::Center) => Context::Center,
         };
@@ -323,6 +379,7 @@ impl App {
     pub fn update(&mut self, msg: Msg) -> Vec<Effect> {
         let mut effects = self.handle(msg);
         effects.extend(self.sync_details());
+        effects.extend(self.sync_data());
         effects
     }
 
@@ -380,7 +437,7 @@ impl App {
                 Vec::new()
             }
             Some(_) => Vec::new(),
-            None if self.tab == Tab::Schema
+            None if matches!(self.tab, Tab::Schema | Tab::Data)
                 && session.lost.is_none()
                 && session.catalog.is_some() =>
             {
@@ -498,6 +555,9 @@ impl App {
     }
 
     fn on_overlay_key(&mut self, key: KeyEvent) -> Vec<Effect> {
+        if self.overlay.as_ref().is_some_and(Overlay::is_data) {
+            return self.on_data_overlay_key(key);
+        }
         let Some(overlay) = self.overlay.as_mut() else {
             return Vec::new();
         };
@@ -516,6 +576,12 @@ impl App {
                 }
                 Vec::new()
             }
+            // Routed to `on_data_overlay_key` above.
+            Overlay::DataSearch { .. }
+            | Overlay::FreeWhere(_)
+            | Overlay::FilterEditor(_)
+            | Overlay::CopyFormat { .. }
+            | Overlay::RowDetail { .. } => Vec::new(),
             Overlay::Error { .. } => {
                 if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) {
                     self.overlay = None;
@@ -564,6 +630,9 @@ impl App {
             Help => self.overlay = Some(Overlay::Help { scroll: 0 }),
             CommandPalette => self.overlay = Some(Overlay::Command(LineInput::default())),
             Interrupt => {
+                if let Some(effects) = self.cancel_data() {
+                    return effects;
+                }
                 let quit = self
                     .keymap
                     .hint(Context::Global, Quit)
@@ -590,6 +659,7 @@ impl App {
             ReloadCatalog => return self.reload_catalog(),
             _ if self.focus == Focus::Tree => self.dispatch_tree(action),
             _ if self.tab == Tab::Schema => return self.dispatch_schema(action),
+            _ if self.tab == Tab::Data => return self.dispatch_data(action),
             _ => {}
         }
         Vec::new()
@@ -831,6 +901,7 @@ impl App {
                 self.session = None;
                 self.current = None;
                 self.schema = SchemaView::default();
+                self.data = DataView::default();
                 self.back_stack.clear();
                 self.tree = TreeState::default();
                 self.screen = Screen::Picker;
@@ -938,6 +1009,7 @@ impl App {
                     self.tree = TreeState::default();
                     self.current = None;
                     self.schema = SchemaView::default();
+                    self.data = DataView::default();
                     self.back_stack.clear();
                     self.focus = Focus::Tree;
                 }
@@ -1012,6 +1084,7 @@ impl App {
                         if !exists {
                             self.current = None;
                             self.schema = SchemaView::default();
+                            self.data = DataView::default();
                         }
                     }
                     s.catalog = Some(catalog);
@@ -1044,6 +1117,13 @@ impl App {
                 if let Some(s) = &mut self.session {
                     s.details.insert(object, DetailsState::Failed(error));
                 }
+                Vec::new()
+            }
+            ev @ (DbEvent::RowsLoaded { .. }
+            | DbEvent::RowsFailed { .. }
+            | DbEvent::RowsCounted { .. }
+            | DbEvent::CountFailed { .. }) => {
+                self.on_data_event(ev);
                 Vec::new()
             }
             DbEvent::ConnectionLost(e) => {
