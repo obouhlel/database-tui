@@ -127,7 +127,7 @@ actions! {
     Open => "open", "Ouvrir l'objet";
     Filter => "filter", "Filtrer";
     ClearFilter => "clear_filter", "Effacer le filtre";
-    ReloadCatalog => "reload_catalog", "Recharger le catalogue";
+    ReloadCatalog => "reload_catalog", "Recharger les bases et les catalogues";
     Connect => "connect", "Se connecter";
     ScrollLeft => "scroll_left", "Colonnes vers la gauche";
     ScrollRight => "scroll_right", "Colonnes vers la droite";

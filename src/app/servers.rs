@@ -152,11 +152,18 @@ impl App {
         effects
     }
 
-    /// Reloads every loaded catalog (and retries failed ones).
+    /// Re-reads the list of databases of every open connection, reloads
+    /// every loaded catalog (and retries failed ones).
     pub(super) fn reload_catalog(&mut self) -> Vec<Effect> {
         let include_system = self.config.general.show_system_schemas;
         let mut effects = Vec::new();
         for s in self.servers.iter_mut().filter(|s| s.is_connected()) {
+            effects.push(
+                DbCommand::ListDatabases {
+                    connection: s.conn.name.clone(),
+                }
+                .into(),
+            );
             for db in &mut s.databases {
                 if (db.catalog.is_some() || db.error.is_some()) && !db.loading {
                     db.loading = true;
@@ -174,6 +181,79 @@ impl App {
         }
         self.refresh_tree();
         effects
+    }
+
+    /// New list of the databases of a connection (`R`): adds the new ones,
+    /// drops those that no longer exist, keeps the state of the others.
+    fn on_databases_listed(&mut self, connection: &str, listed: Vec<DatabaseInfo>) {
+        let Some(s) = self.server_mut(connection).filter(|s| s.is_connected()) else {
+            return;
+        };
+        let primary = s.info.as_ref().map(|i| i.database.clone());
+        let mut old: Vec<DatabaseEntry> = std::mem::take(&mut s.databases);
+        let mut added = Vec::new();
+        let mut databases = Vec::with_capacity(listed.len());
+        for info in listed {
+            match old.iter().position(|d| d.name() == info.name) {
+                Some(i) => {
+                    let mut entry = old.swap_remove(i);
+                    entry.info = info;
+                    databases.push(entry);
+                }
+                None => {
+                    added.push(info.name.clone());
+                    databases.push(DatabaseEntry::new(info));
+                }
+            }
+        }
+        // The connected database stays, even if it cannot be listed.
+        if let Some(p) = &primary
+            && let Some(i) = old.iter().position(|d| d.name() == p)
+        {
+            databases.push(old.swap_remove(i));
+        }
+        databases.sort_by_key(|d| (Some(d.name()) != primary.as_deref(), d.name().to_string()));
+        s.databases = databases;
+        let removed: Vec<String> = old.into_iter().map(|d| d.name().to_string()).collect();
+        s.details.retain(|o, _| !removed.contains(&o.database));
+        for db in &removed {
+            self.forget_database(connection, db);
+        }
+        self.refresh_tree();
+        added.sort();
+        let mut parts = Vec::new();
+        if !added.is_empty() {
+            parts.push(format!("nouvelle(s) base(s) : {}", added.join(", ")));
+        }
+        if !removed.is_empty() {
+            parts.push(format!("base(s) disparue(s) : {}", removed.join(", ")));
+        }
+        if !parts.is_empty() {
+            self.notify(Level::Info, format!("{connection} — {}", parts.join(" ; ")));
+        }
+    }
+
+    /// A database dropped on the server: its nodes, views and caches go.
+    fn forget_database(&mut self, connection: &str, database: &str) {
+        self.tree.forget_database(connection, database);
+        let concerned = |o: &ObjectRef| o.connection == connection && o.database == database;
+        if self.current.as_ref().is_some_and(concerned) {
+            self.current = None;
+            self.schema = SchemaView::default();
+            self.data = DataView::default();
+        }
+        self.back_stack.retain(|o| !concerned(o));
+        self.sql
+            .columns
+            .remove(&(connection.to_string(), database.to_string()));
+        if self
+            .sql
+            .target
+            .as_ref()
+            .is_some_and(|(c, d)| c == connection && d == database)
+        {
+            self.sql_connection_closed(connection);
+        }
     }
 
     /// Closes a connection and collapses its node.
@@ -367,6 +447,16 @@ impl App {
                 }
                 self.refresh_tree();
                 tracing::info!(connection = %conn_name, database = %db_name, objects = count, ?elapsed, "catalog loaded");
+            }
+            DbEvent::DatabasesListed {
+                connection,
+                databases,
+            } => self.on_databases_listed(&connection, databases),
+            DbEvent::DatabasesFailed { connection, error } => {
+                self.notify(
+                    Level::Error,
+                    format!("{connection} : liste des bases illisible ({error})"),
+                );
             }
             DbEvent::CatalogFailed {
                 connection,

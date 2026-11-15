@@ -961,6 +961,62 @@ async fn worker_opens_other_databases_lazily() {
     }
 }
 
+async fn listed(
+    commands: &tokio::sync::mpsc::UnboundedSender<DbCommand>,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<DbEvent>,
+) -> Vec<String> {
+    commands
+        .send(DbCommand::ListDatabases {
+            connection: "test".into(),
+        })
+        .unwrap();
+    match next_event(rx).await {
+        DbEvent::DatabasesListed { databases, .. } => {
+            databases.into_iter().map(|d| d.name).collect()
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+/// A database created or dropped while connected shows up in (or leaves)
+/// the list re-read by `ListDatabases`.
+#[tokio::test]
+async fn worker_relists_databases() {
+    let Some(url) = test_url() else { return };
+    let admin = db::connect(&request(&url), no_lost()).await.unwrap();
+    let name = "pgtui_relist";
+    let _ = admin
+        .execute(&format!("DROP DATABASE IF EXISTS {name}"), 0)
+        .await;
+    let (tx, mut rx) = unbounded_channel();
+    let commands = worker::spawn(tx);
+    commands
+        .send(DbCommand::Connect {
+            request: Box::new(request(&url)),
+            resolve_password: false,
+        })
+        .unwrap();
+    match next_event(&mut rx).await {
+        DbEvent::Connected { databases, .. } => {
+            assert!(!databases.iter().any(|d| d.name == name))
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+    admin
+        .execute(&format!("CREATE DATABASE {name}"), 0)
+        .await
+        .unwrap();
+    let names = listed(&commands, &mut rx).await;
+    assert!(names.iter().any(|n| n == name), "{names:?}");
+    admin
+        .execute(&format!("DROP DATABASE {name}"), 0)
+        .await
+        .unwrap();
+    let names = listed(&commands, &mut rx).await;
+    assert!(!names.iter().any(|n| n == name), "{names:?}");
+    assert!(names.iter().any(|n| n == "demo"), "{names:?}");
+}
+
 async fn next_event(rx: &mut tokio::sync::mpsc::UnboundedReceiver<DbEvent>) -> DbEvent {
     tokio::time::timeout(Duration::from_secs(10), rx.recv())
         .await

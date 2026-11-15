@@ -243,7 +243,7 @@ Couleurs : noms (`red`, `light-blue`, `orange`…), `#rrggbb` ou index ANSI (`20
 | | `dd` | Retirer la connexion de la liste et de `config.toml` (confirmation) |
 | | `/` | Filtre flou (`schema.table` pour qualifier) |
 | | `Esc` | Effacer le filtre |
-| | `R` | Recharger le catalogue |
+| | `R` | Recharger la liste des bases et les catalogues |
 | Page connexions | `Enter` | Se connecter (formulaire utilisateur / mot de passe pour un serveur détecté) |
 | | `R` | Relancer la détection des serveurs locaux |
 | | `Esc` · `q` | Revenir à l'écran principal |

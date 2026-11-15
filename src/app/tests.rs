@@ -1,6 +1,6 @@
 use super::*;
 use crate::config::ConnectionConfig;
-use crate::db::catalog::{Catalog, DbObject, ObjectKind, Schema};
+use crate::db::catalog::{Catalog, DatabaseInfo, DbObject, ObjectKind, Schema};
 use crate::db::{BackendKind, ServerInfo};
 use crossterm::event::KeyModifiers;
 use pretty_assertions::assert_eq;
@@ -352,7 +352,10 @@ fn command_line() {
     key(&mut app, ":");
     typed(&mut app, "reload");
     let cmds = key(&mut app, "enter");
-    assert!(matches!(cmds.as_slice(), [DbCommand::LoadCatalog { .. }]));
+    assert!(matches!(
+        cmds.as_slice(),
+        [DbCommand::ListDatabases { connection }, DbCommand::LoadCatalog { .. }] if connection == "local"
+    ));
     key(&mut app, "ctrl+p");
     typed(&mut app, "q");
     key(&mut app, "enter");
@@ -412,6 +415,82 @@ fn connection_lost_then_reconnect() {
         key(&mut app, "enter").as_slice(),
         [DbCommand::Connect { .. }]
     ));
+}
+
+fn db_info(name: &str, size: i64) -> DatabaseInfo {
+    DatabaseInfo {
+        name: name.into(),
+        comment: None,
+        size_bytes: Some(size),
+        can_connect: true,
+    }
+}
+
+fn database_names(app: &App) -> Vec<String> {
+    app.server("local")
+        .unwrap()
+        .databases
+        .iter()
+        .map(|d| d.name().to_string())
+        .collect()
+}
+
+/// `R` re-reads the databases: new ones appear, dropped ones go, the
+/// others keep their catalog and expansion.
+#[test]
+fn reload_refreshes_the_list_of_databases() {
+    let mut app = connected_app();
+    app.update(Msg::Db(DbEvent::DatabasesListed {
+        connection: "local".into(),
+        databases: vec![db_info("demo", 10), db_info("old", 1)],
+    }));
+    assert_eq!(database_names(&app), ["demo", "old"]);
+    app.update(Msg::Db(DbEvent::CatalogLoaded {
+        catalog: catalog_for("old"),
+        elapsed: Duration::from_millis(3),
+    }));
+    // Open a table of `old`, then the server drops it and creates `mnemo`.
+    app.current = Some(ObjectRef {
+        connection: "local".into(),
+        database: "old".into(),
+        schema: "public".into(),
+        name: "orders".into(),
+        kind: ObjectKind::Table,
+        signature: None,
+    });
+    let cmds = key(&mut app, "R");
+    assert!(matches!(
+        cmds.first(),
+        Some(DbCommand::ListDatabases { .. })
+    ));
+    app.update(Msg::Db(DbEvent::DatabasesListed {
+        connection: "local".into(),
+        databases: vec![db_info("mnemo", 5), db_info("demo", 20)],
+    }));
+    assert_eq!(
+        database_names(&app),
+        ["demo", "mnemo"],
+        "connected one first"
+    );
+    let s = app.server("local").unwrap();
+    let demo = s.database("demo").unwrap();
+    assert!(demo.catalog.is_some(), "catalog kept");
+    assert_eq!(demo.info.size_bytes, Some(20), "size refreshed");
+    assert!(app.current.is_none(), "view of the dropped database closed");
+    assert!(app.tree.rows.iter().any(|r| r.label == "mnemo"));
+    assert!(!app.tree.rows.iter().any(|r| r.label == "old"));
+    assert!(
+        app.tree.rows.iter().any(|r| r.label == "customers"),
+        "demo still expanded"
+    );
+    let msg = &app.status.as_ref().unwrap().text;
+    assert!(msg.contains("mnemo") && msg.contains("old"), "{msg}");
+    // The connected database stays even if the list misses it.
+    app.update(Msg::Db(DbEvent::DatabasesListed {
+        connection: "local".into(),
+        databases: vec![],
+    }));
+    assert_eq!(database_names(&app), ["demo"]);
 }
 
 #[test]

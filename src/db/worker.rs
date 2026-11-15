@@ -36,6 +36,11 @@ pub enum DbCommand {
         database: String,
         include_system: bool,
     },
+    /// Re-reads the databases of an open connection; the backends of those
+    /// that no longer exist are closed.
+    ListDatabases {
+        connection: String,
+    },
     LoadDetails(ObjectRef),
     /// Fetch a window of rows; `id` is echoed back to discard stale results.
     FetchRows {
@@ -114,6 +119,14 @@ pub enum DbEvent {
         connection: String,
         error: String,
         password_required: bool,
+    },
+    DatabasesListed {
+        connection: String,
+        databases: Vec<DatabaseInfo>,
+    },
+    DatabasesFailed {
+        connection: String,
+        error: String,
     },
     /// `catalog.connection` names the connection.
     CatalogLoaded {
@@ -229,6 +242,21 @@ struct Pool {
 }
 
 impl Pool {
+    /// The database chosen at connection time.
+    fn primary(&self) -> String {
+        self.template.conn.effective_database()
+    }
+
+    /// Closes the backends of the databases not in `keep` (the primary
+    /// database stays open).
+    async fn retain(&self, keep: &[DatabaseInfo]) {
+        let primary = self.primary();
+        self.backends
+            .lock()
+            .await
+            .retain(|name, _| *name == primary || keep.iter().any(|d| d.name == *name));
+    }
+
     async fn get(&self, database: &str) -> Result<Arc<dyn Backend>, ConnectError> {
         let cell = self
             .backends
@@ -296,6 +324,36 @@ async fn run(mut commands: UnboundedReceiver<DbCommand>, events: UnboundedSender
                     pools.clone(),
                     events.clone(),
                 ));
+            }
+            DbCommand::ListDatabases { connection } => {
+                let Some(p) = pool(&pools, &connection) else {
+                    send(
+                        &events,
+                        DbEvent::DatabasesFailed {
+                            connection,
+                            error: "non connecté".into(),
+                        },
+                    );
+                    continue;
+                };
+                let events = events.clone();
+                tokio::spawn(async move {
+                    let listed = match p.get(&p.primary()).await {
+                        Ok(b) => b.list_databases().await.map_err(|e| format!("{e:#}")),
+                        Err(e) => Err(e.to_string()),
+                    };
+                    let ev = match listed {
+                        Ok(databases) => {
+                            p.retain(&databases).await;
+                            DbEvent::DatabasesListed {
+                                connection,
+                                databases,
+                            }
+                        }
+                        Err(error) => DbEvent::DatabasesFailed { connection, error },
+                    };
+                    send(&events, ev);
+                });
             }
             DbCommand::LoadCatalog {
                 connection,

@@ -165,6 +165,14 @@ impl TreeState {
         self.initialised.retain(|(c, _)| c != connection);
     }
 
+    /// Forgets the expanded nodes of a database that no longer exists.
+    pub fn forget_database(&mut self, connection: &str, database: &str) {
+        self.expanded
+            .retain(|k| k.connection() != connection || k.database() != Some(database));
+        self.initialised
+            .retain(|(c, d)| c != connection || d != database);
+    }
+
     /// Puts the cursor on a node if it is visible.
     pub fn select(&mut self, key: &NodeKey) -> bool {
         match self.rows.iter().position(|r| &r.key == key) {
