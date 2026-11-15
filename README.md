@@ -182,3 +182,7 @@ Sans `PGTUI_TEST_DATABASE_URL`, les tests d'intégration sont ignorés avec un m
 - [ ] **Jalon 4** — édition, staging, vue diff, commit transactionnel, détection de conflits
 - [ ] **Jalon 5** — onglet SQL : éditeur, exécution, résultats, historique, annulation, transactions manuelles
 - [ ] **Jalon 6** — autocomplétion, EXPLAIN, export, finitions
+
+## Licence
+
+Domaine public — [The Unlicense](LICENSE). Vous pouvez copier, modifier, distribuer et utiliser ce code librement, sans condition.

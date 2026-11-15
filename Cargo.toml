@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.97"
 description = "Keyboard-driven PostgreSQL client for the terminal"
 readme = "README.md"
+license = "Unlicense"
 
 [dependencies]
 anyhow = "1.0.104"
