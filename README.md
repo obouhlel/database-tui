@@ -5,6 +5,17 @@ Client PostgreSQL en mode texte (TUI), entièrement pilotable au clavier — une
 > **État : jalon 2 / 6** — configuration, connexions, arbre des objets, onglet Schema (colonnes, index, contraintes, triggers, relations, DDL, statistiques).
 > Les onglets Data et SQL arrivent aux jalons suivants (voir [Feuille de route](#feuille-de-route)).
 
+## Captures
+
+![Onglet Schema : colonnes](docs/screenshots/02-schema-colonnes.png)
+
+| | |
+|---|---|
+| ![Sélecteur de connexion](docs/screenshots/01-selecteur.png) | ![DDL](docs/screenshots/04-ddl.png) |
+| ![Relations](docs/screenshots/03-relations.png) | ![Connexion de production](docs/screenshots/08-prod.png) |
+
+Captures du vrai binaire, régénérables avec `scripts/screenshots/capture.sh` (tmux, Python, Node + Playwright, base de démo lancée).
+
 ## Installation
 
 Prérequis : Rust stable ≥ 1.97.

@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Regenerates docs/screenshots/*.png from the real binary.
+# Needs: tmux, python3, node + playwright (chromium), the demo DB (docker compose up -d).
+set -euo pipefail
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+HERE="$ROOT/scripts/screenshots"
+WORK=$(mktemp -d)
+trap 'tmux -f "$WORK/tmux.conf" kill-server 2>/dev/null || true; rm -rf "$WORK"' EXIT
+
+cargo build --release --manifest-path "$ROOT/Cargo.toml" -q
+BIN="$ROOT/target/release/pgtui"
+mkdir -p "$WORK/config/pgtui"
+cat > "$WORK/config/pgtui/config.toml" <<'TOML'
+[general]
+default_connection = "local"
+[[connections]]
+name = "local"
+user = "postgres"
+database = "mydb"
+color = "green"
+[[connections]]
+name = "demo"
+port = 5433
+user = "pgtui"
+database = "demo"
+password_cmd = "printf pgtui"
+color = "cyan"
+[[connections]]
+name = "prod-demo"
+port = 5433
+user = "pgtui"
+database = "demo"
+password_cmd = "printf pgtui"
+read_only = true
+color = "red"
+TOML
+cat > "$WORK/tmux.conf" <<'TMUX'
+set -g default-terminal "tmux-256color"
+set -as terminal-features ",*:RGB"
+set -g status off
+set -sg escape-time 0
+TMUX
+
+start() { # args, width, height
+  tmux -f "$WORK/tmux.conf" kill-server 2>/dev/null || true
+  tmux -f "$WORK/tmux.conf" new-session -d -s pg -x "$2" -y "$3" \
+    "env XDG_CONFIG_HOME=$WORK/config XDG_STATE_HOME=$WORK/state COLORTERM=truecolor $BIN $1; sleep 120"
+  sleep 1.5
+}
+keys() { for k in "$@"; do tmux send-keys -t pg "$k"; sleep 0.15; done; sleep 0.6; }
+shot() {
+  tmux capture-pane -e -N -p -t pg > "$WORK/$1.ans"
+  python3 -I "$HERE/ansi2html.py" "$WORK/$1.ans" "$WORK/$1.html" "$2"
+}
+
+start "" 110 18; shot 01-selecteur "pgtui — connexions"
+start "--connection demo" 140 32
+keys / o r d e r s Enter Enter; sleep 0.5; shot 02-schema-colonnes "pgtui — Schema : colonnes"
+keys ']' ']' ']' ']'; shot 03-relations "pgtui — Schema : relations"
+keys ']'; shot 04-ddl "pgtui — Schema : DDL"
+keys ']'; shot 05-infos "pgtui — Schema : infos"
+keys C-h / c u s; shot 06-filtre "pgtui — filtre de l'arbre"
+keys Enter '?'; shot 07-aide "pgtui — aide"
+start "--connection prod-demo" 140 24
+keys / p r o d u c t s Enter Enter; sleep 0.5; keys ']' ']'; shot 08-prod "pgtui — connexion de production"
+
+mkdir -p "$ROOT/docs/screenshots"
+node "$HERE/render.js" "$ROOT/docs/screenshots" "$WORK"/0*.html
