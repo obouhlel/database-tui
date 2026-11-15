@@ -11,6 +11,7 @@ mouse = false                 # true : capture souris (désactive la sélection 
 statement_timeout_secs = 0    # timeout des requêtes en secondes, 0 = aucun
 show_system_schemas = false   # afficher pg_catalog / information_schema dans l'arbre
 log_level = "info"            # logs dans ~/.local/state/pgtui/pgtui.log (ou $PGTUI_LOG)
+clipboard = "auto"            # "auto" | "system" | "osc52" (OSC 52 : copie via le terminal, utile en SSH)
 
 [editor]
 mode = "classic"              # "classic" (toujours en insertion) | "vim" (modal)

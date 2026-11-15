@@ -22,14 +22,17 @@ pub enum Context {
     Picker,
     Tree,
     Center,
+    /// Center panel, Schema tab.
+    Schema,
 }
 
 impl Context {
-    pub const ALL: [Context; 4] = [
+    pub const ALL: [Context; 5] = [
         Context::Global,
         Context::Picker,
         Context::Tree,
         Context::Center,
+        Context::Schema,
     ];
 
     pub fn name(self) -> &'static str {
@@ -38,6 +41,7 @@ impl Context {
             Context::Picker => "picker",
             Context::Tree => "tree",
             Context::Center => "center",
+            Context::Schema => "schema",
         }
     }
 
@@ -47,6 +51,7 @@ impl Context {
             Context::Picker => "Sélecteur de connexion",
             Context::Tree => "Arbre des objets",
             Context::Center => "Panneau central",
+            Context::Schema => "Onglet Schema",
         }
     }
 
@@ -108,6 +113,16 @@ actions! {
     ClearFilter => "clear_filter", "Effacer le filtre";
     ReloadCatalog => "reload_catalog", "Recharger le catalogue";
     Connect => "connect", "Se connecter";
+    ScrollLeft => "scroll_left", "Colonnes vers la gauche";
+    ScrollRight => "scroll_right", "Colonnes vers la droite";
+    FirstColumn => "first_column", "Première colonne";
+    LastColumn => "last_column", "Dernière colonne";
+    NextSection => "next_section", "Section suivante";
+    PrevSection => "prev_section", "Section précédente";
+    FollowLink => "follow_link", "Aller à la table liée";
+    JumpBack => "jump_back", "Revenir à l'objet précédent";
+    Copy => "copy", "Copier (DDL ou ligne)";
+    Refresh => "refresh", "Recharger";
 }
 
 #[derive(Debug, Clone)]
@@ -152,8 +167,18 @@ fn defaults() -> Vec<(Context, Action, &'static [&'static str])> {
         (Tree, ClearFilter, &["esc"]),
         (Tree, ReloadCatalog, &["R"]),
         (Picker, Connect, &["enter"]),
+        (Schema, ScrollLeft, &["h", "left"]),
+        (Schema, ScrollRight, &["l", "right"]),
+        (Schema, FirstColumn, &["0"]),
+        (Schema, LastColumn, &["$"]),
+        (Schema, NextSection, &["]"]),
+        (Schema, PrevSection, &["["]),
+        (Schema, FollowLink, &["enter"]),
+        (Schema, JumpBack, &["ctrl+o", "backspace"]),
+        (Schema, Copy, &["y"]),
+        (Schema, Refresh, &["R"]),
     ];
-    for ctx in [Picker, Tree, Center] {
+    for ctx in [Picker, Tree, Center, Schema] {
         v.extend([
             (ctx, Up, &["k", "up"][..]),
             (ctx, Down, &["j", "down"][..]),

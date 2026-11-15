@@ -9,7 +9,8 @@ use futures::StreamExt;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc::unbounded_channel;
 
-use crate::app::{App, Msg};
+use crate::app::{App, Effect, Level, Msg};
+use crate::clipboard::Clipboard;
 use crate::db::worker;
 use crate::terminal::Tui;
 use crate::ui;
@@ -19,8 +20,9 @@ const TICK: Duration = Duration::from_millis(100);
 pub async fn run(terminal: &mut Tui, mut app: App) -> Result<()> {
     let (event_tx, mut db_events) = unbounded_channel();
     let commands = worker::spawn(event_tx);
-    for cmd in app.init() {
-        commands.send(cmd)?;
+    let mut clipboard = Clipboard::new(app.config.general.clipboard);
+    for effect in app.init() {
+        run_effect(effect, &commands, &mut clipboard, &mut app)?;
     }
 
     let mut input = crossterm::event::EventStream::new();
@@ -47,12 +49,34 @@ pub async fn run(terminal: &mut Tui, mut app: App) -> Result<()> {
             _ = sigterm.recv() => Msg::Terminate,
             _ = sighup.recv() => Msg::Terminate,
         };
-        for cmd in app.update(msg) {
-            commands.send(cmd)?;
+        for effect in app.update(msg) {
+            run_effect(effect, &commands, &mut clipboard, &mut app)?;
         }
         if app.should_quit {
             break;
         }
+    }
+    Ok(())
+}
+
+fn run_effect(
+    effect: Effect,
+    commands: &tokio::sync::mpsc::UnboundedSender<worker::DbCommand>,
+    clipboard: &mut Clipboard,
+    app: &mut App,
+) -> Result<()> {
+    match effect {
+        Effect::Db(cmd) => commands.send(cmd)?,
+        Effect::Copy(text) => match clipboard.copy(&text) {
+            Ok(method) => tracing::debug!(bytes = text.len(), method, "copied"),
+            Err(e) => {
+                // Follow-up effects of a notification are always empty.
+                let _ = app.update(Msg::Notify(
+                    Level::Error,
+                    format!("Copie impossible : {e:#}"),
+                ));
+            }
+        },
     }
     Ok(())
 }

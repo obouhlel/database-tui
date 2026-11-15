@@ -4,7 +4,8 @@
 
 use async_trait::async_trait;
 
-use super::catalog::Catalog;
+use super::catalog::{Catalog, ObjectRef};
+use super::schema::ObjectDetails;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendKind {
@@ -17,6 +18,8 @@ pub struct ServerInfo {
     pub kind: BackendKind,
     /// e.g. `17.2`
     pub version: String,
+    /// e.g. `170002`
+    pub version_num: i32,
     pub user: String,
     pub database: String,
     /// `true` if the TLS handshake succeeded.
@@ -36,4 +39,7 @@ pub trait Backend: Send + Sync {
     /// Loads schemas and their objects. System schemas are included only if
     /// `include_system` is set.
     async fn load_catalog(&self, include_system: bool) -> anyhow::Result<Catalog>;
+
+    /// Columns, indexes, constraints, DDL, ... of one object.
+    async fn object_details(&self, object: &ObjectRef) -> anyhow::Result<ObjectDetails>;
 }

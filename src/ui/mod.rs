@@ -6,7 +6,10 @@ mod center;
 mod help;
 mod picker;
 mod popup;
+mod schema_view;
+mod sql_view;
 mod status_bar;
+pub mod table_view;
 pub mod theme;
 mod tree;
 

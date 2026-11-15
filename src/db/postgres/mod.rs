@@ -6,6 +6,8 @@
 //!   blocked behind a long user query. It is always read-only.
 
 mod catalog;
+pub mod ddl;
+mod details;
 mod tls;
 
 use std::sync::Arc;
@@ -16,7 +18,8 @@ use tokio_postgres::Client;
 use tokio_postgres::error::SqlState;
 
 use super::backend::{Backend, BackendKind, ServerInfo};
-use super::catalog::Catalog;
+use super::catalog::{Catalog, ObjectRef};
+use super::schema::ObjectDetails;
 use super::{ConnectError, ConnectRequest};
 use crate::config::SslMode;
 
@@ -64,7 +67,8 @@ impl PgBackend {
         let row = session
             .query_one(
                 "SELECT current_setting('server_version'), current_user::text, current_database()::text, \
-                 coalesce((SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()), false)",
+                 coalesce((SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()), false), \
+                 current_setting('server_version_num')::int4",
                 &[],
             )
             .await
@@ -75,6 +79,7 @@ impl PgBackend {
             user: row.get(1),
             database: row.get(2),
             tls: row.get(3),
+            version_num: row.get(4),
         };
         tracing::info!(
             connection = %req.conn.name,
@@ -159,5 +164,9 @@ impl Backend for PgBackend {
 
     async fn load_catalog(&self, include_system: bool) -> anyhow::Result<Catalog> {
         catalog::load(&self.catalog, include_system).await
+    }
+
+    async fn object_details(&self, object: &ObjectRef) -> anyhow::Result<ObjectDetails> {
+        details::load(&self.catalog, object).await
     }
 }

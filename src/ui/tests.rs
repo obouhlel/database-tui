@@ -41,6 +41,7 @@ fn connect(app: &mut App) {
         info: ServerInfo {
             kind: BackendKind::Postgres,
             version: "17.2".into(),
+            version_num: 170002,
             user: "pgtui".into(),
             database: "demo".into(),
             tls: false,
@@ -128,13 +129,82 @@ fn production_banner() {
 }
 
 #[test]
-fn open_object_shows_details() {
+fn open_object_shows_schema_tab() {
+    use crate::app::Effect;
+    use crate::db::catalog::ObjectRef;
+    use crate::db::schema::{Column, ObjectDetails};
+    use crate::db::worker::DbCommand;
+
     let mut app = app(ConnectionConfig::named("demo"));
     connect(&mut app);
-    press(&mut app, "j j enter");
+    let mut effects = Vec::new();
+    for c in KeyChord::parse_seq("j j enter").unwrap() {
+        effects.extend(app.update(Msg::Key(KeyEvent::new(c.code, c.mods))));
+    }
+    let requested: Vec<_> = effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Db(DbCommand::LoadDetails(o)) => Some(o.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(requested.len(), 1, "details requested once");
+    let screen = render(&mut app, 100, 20);
+    assert!(screen.contains("Chargement de shop.customers"), "{screen}");
+
+    let obj: ObjectRef = requested[0].clone();
+    let column = Column {
+        name: "email".into(),
+        data_type: "text".into(),
+        nullable: false,
+        default: None,
+        identity: None,
+        generated: None,
+        collation: None,
+        comment: Some("adresse".into()),
+        primary_key: false,
+        references: None,
+    };
+    app.update(Msg::Db(DbEvent::DetailsLoaded {
+        details: Box::new(ObjectDetails {
+            object: obj,
+            owner: Some("pgtui".into()),
+            comment: Some("Clients".into()),
+            columns: vec![column],
+            indexes: vec![],
+            constraints: vec![],
+            triggers: vec![],
+            foreign_keys: vec![],
+            referenced_by: vec![],
+            stats: None,
+            properties: vec![],
+            ddl: "CREATE TABLE shop.customers (\n    email text NOT NULL\n);\n".into(),
+        }),
+        elapsed: Duration::from_millis(4),
+    }));
     let screen = render(&mut app, 100, 20);
     assert!(screen.contains("shop.customers"), "{screen}");
-    assert!(screen.contains("Clients"), "{screen}");
+    assert!(screen.contains("propriétaire pgtui"), "{screen}");
+    assert!(screen.contains("Colonnes 1"), "{screen}");
+    assert!(screen.contains("email"), "{screen}");
+    assert!(screen.contains("NOT NULL"), "{screen}");
+    assert!(screen.contains("adresse"), "{screen}");
+
+    // `]` cycles to the DDL section, `y` copies it.
+    let mut copy = Vec::new();
+    for c in KeyChord::parse_seq("] ] ] ] ] y").unwrap() {
+        copy.extend(app.update(Msg::Key(KeyEvent::new(c.code, c.mods))));
+    }
+    let screen = render(&mut app, 100, 20);
+    assert!(
+        screen.contains("1 CREATE TABLE shop.customers ("),
+        "{screen}"
+    );
+    assert!(
+        copy.iter()
+            .any(|e| matches!(e, Effect::Copy(t) if t.starts_with("CREATE TABLE"))),
+        "{copy:?}"
+    );
 }
 
 #[test]

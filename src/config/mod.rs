@@ -76,6 +76,18 @@ pub struct General {
     pub show_system_schemas: bool,
     /// Log level for `~/.local/state/pgtui/pgtui.log` (overridden by `PGTUI_LOG`).
     pub log_level: String,
+    /// `auto`, `system` or `osc52`.
+    pub clipboard: ClipboardMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClipboardMode {
+    /// OSC 52 over SSH, else the system clipboard with OSC 52 as fallback.
+    #[default]
+    Auto,
+    System,
+    Osc52,
 }
 
 impl Default for General {
@@ -89,6 +101,7 @@ impl Default for General {
             statement_timeout_secs: 0,
             show_system_schemas: false,
             log_level: "info".into(),
+            clipboard: ClipboardMode::Auto,
         }
     }
 }

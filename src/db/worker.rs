@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-use super::catalog::Catalog;
+use super::catalog::{Catalog, ObjectRef};
+use super::schema::ObjectDetails;
 use super::{Backend, ConnectError, ConnectRequest, ServerInfo};
 use crate::config::password;
 
@@ -22,6 +23,7 @@ pub enum DbCommand {
     LoadCatalog {
         include_system: bool,
     },
+    LoadDetails(ObjectRef),
     Disconnect,
 }
 
@@ -40,6 +42,14 @@ pub enum DbEvent {
         elapsed: Duration,
     },
     CatalogFailed(String),
+    DetailsLoaded {
+        details: Box<ObjectDetails>,
+        elapsed: Duration,
+    },
+    DetailsFailed {
+        object: ObjectRef,
+        error: String,
+    },
     ConnectionLost(String),
 }
 
@@ -134,6 +144,33 @@ async fn run(mut commands: UnboundedReceiver<DbCommand>, events: UnboundedSender
                             elapsed: started.elapsed(),
                         },
                         Err(e) => DbEvent::CatalogFailed(format!("{e:#}")),
+                    };
+                    send(&events, ev);
+                });
+            }
+            DbCommand::LoadDetails(object) => {
+                let Some(b) = backend.clone() else {
+                    send(
+                        &events,
+                        DbEvent::DetailsFailed {
+                            object,
+                            error: "not connected".into(),
+                        },
+                    );
+                    continue;
+                };
+                let events = events.clone();
+                tokio::spawn(async move {
+                    let started = Instant::now();
+                    let ev = match b.object_details(&object).await {
+                        Ok(details) => DbEvent::DetailsLoaded {
+                            details: Box::new(details),
+                            elapsed: started.elapsed(),
+                        },
+                        Err(e) => DbEvent::DetailsFailed {
+                            object,
+                            error: format!("{e:#}"),
+                        },
                     };
                     send(&events, ev);
                 });

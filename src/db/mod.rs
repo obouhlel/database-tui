@@ -4,6 +4,7 @@
 pub mod backend;
 pub mod catalog;
 pub mod postgres;
+pub mod schema;
 pub mod worker;
 
 use std::path::PathBuf;

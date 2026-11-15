@@ -2,8 +2,8 @@
 
 Client PostgreSQL en mode texte (TUI), entièrement pilotable au clavier — une alternative légère à DBeaver pour l'usage quotidien.
 
-> **État : jalon 1 / 6** — configuration, connexions, arbre des objets, barre de statut, restauration du terminal.
-> Les onglets Schema, Data et SQL arrivent aux jalons suivants (voir [Feuille de route](#feuille-de-route)).
+> **État : jalon 2 / 6** — configuration, connexions, arbre des objets, onglet Schema (colonnes, index, contraintes, triggers, relations, DDL, statistiques).
+> Les onglets Data et SQL arrivent aux jalons suivants (voir [Feuille de route](#feuille-de-route)).
 
 ## Installation
 
@@ -59,6 +59,7 @@ mouse = false                 # capture souris (désactive la sélection native 
 statement_timeout_secs = 0    # 0 = aucun timeout
 show_system_schemas = false
 log_level = "info"            # logs : ~/.local/state/pgtui/pgtui.log (ou $PGTUI_LOG)
+clipboard = "auto"            # "auto" | "system" | "osc52"
 
 [editor]
 mode = "classic"              # "classic" | "vim"
@@ -98,7 +99,7 @@ quit = ["q", "ctrl+q"]
 expand = ["l", "right", "enter"]
 ```
 
-Contextes : `global`, `picker`, `tree`, `center`. Notation : `ctrl+p`, `alt+enter`, `shift+tab`, `f5`, `space`, `gg` (séquence), `ctrl+w h` (séquence avec modificateur). La liste des actions et leur nom figurent dans l'aide (`?`). Une surcharge remplace les touches par défaut de l'action, et une touche réaffectée est retirée de son ancienne action.
+Contextes : `global`, `picker`, `tree`, `center`, `schema`. Notation : `ctrl+p`, `alt+enter`, `shift+tab`, `f5`, `space`, `gg` (séquence), `ctrl+w h` (séquence avec modificateur). La liste des actions et leur nom figurent dans l'aide (`?`). Une surcharge remplace les touches par défaut de l'action, et une touche réaffectée est retirée de son ancienne action.
 
 ### Thème
 
@@ -110,7 +111,7 @@ selection_bg = "#283457"
 
 Couleurs : noms (`red`, `light-blue`, `orange`…), `#rrggbb` ou index ANSI (`208`).
 
-## Raccourcis (jalon 1)
+## Raccourcis
 
 | Contexte | Touches | Action |
 |---|---|---|
@@ -134,6 +135,15 @@ Couleurs : noms (`red`, `light-blue`, `orange`…), `#rrggbb` ou index ANSI (`20
 | | `Esc` | Effacer le filtre |
 | | `R` | Recharger le catalogue |
 | Sélecteur | `Enter` | Se connecter |
+| Onglet Schema | `[` / `]` | Section précédente / suivante (Colonnes, Index, Contraintes, Triggers, Relations, DDL, Infos) |
+| | `j`/`k`, `gg`/`G`, `Ctrl+d`/`Ctrl+u` | Naviguer dans la section |
+| | `h`/`l` · `←`/`→`, `0` / `$` | Défiler horizontalement (colonnes, ou texte du DDL) |
+| | `Enter` | Aller à la table liée (colonne FK, ligne de Relations) |
+| | `Ctrl+o` · `Backspace` | Revenir à l'objet précédent |
+| | `y` | Copier le DDL complet (section DDL) ou la ligne courante en TSV |
+| | `R` | Recharger les détails |
+
+**Presse-papier** — `auto` utilise le presse-papier système (X11, Wayland, macOS, Windows) et bascule sur la séquence OSC 52 (copie via le terminal) en SSH ou si le presse-papier système est indisponible. Sous tmux, OSC 52 demande `set -g set-clipboard on`.
 
 Commandes : `:q`, `:help`, `:reload`, `:connect <nom>`, `:connections`, `:reconnect`, `:schema`, `:data`, `:sql`.
 
@@ -146,18 +156,22 @@ src/
 ├── main.rs          CLI, chargement config, logs, runtime tokio
 ├── run.rs           boucle d'événements unique (clavier, événements DB, tick, signaux)
 ├── terminal.rs      raw mode / écran alternatif, restauration garantie (Drop + hook de panic)
+├── clipboard.rs     presse-papier système + repli OSC 52
 ├── config/          config.toml (serde), mots de passe, ~/.pgpass
+├── sql/             quoting des identifiants/littéraux, lexer SQL (coloration, découpage)
 ├── db/
 │   ├── backend.rs   trait Backend (un moteur = une implémentation)
 │   ├── catalog.rs   modèle neutre des objets (schémas, tables, vues…)
-│   ├── postgres/    tokio-postgres + rustls : connexions, TLS, requêtes catalogue
+│   ├── schema.rs    détails neutres d'un objet (colonnes, index, contraintes, FK, stats)
+│   ├── postgres/    tokio-postgres + rustls : connexions, TLS, catalogue, détails, DDL
 │   └── worker.rs    tâche qui possède les connexions ; DbCommand → DbEvent
-├── app/             état + reducer (aucune I/O) : App::update(Msg) -> Vec<DbCommand>
+├── app/             état + reducer (aucune I/O) : App::update(Msg) -> Vec<Effect>
 ├── keymap/          touches → actions par contexte, séquences, surcharges
-└── ui/              rendu pur : tree, status_bar, help, picker, center, popup, theme
+└── ui/              rendu : table_view (réutilisable), schema_view, sql_view, tree, status_bar, help…
 ```
 
-- **Séparation état / rendu / I/O** : l'UI ne fait jamais d'appel DB ; elle envoie des `DbCommand` par canal au worker, qui répond par des `DbEvent`.
+- **Séparation état / rendu / I/O** : l'UI ne fait jamais d'appel DB. Le reducer renvoie des `Effect` (commande DB, copie) que la boucle exécute ; le worker répond par des `DbEvent`.
+- **DDL reconstruit depuis le catalogue** (`pg_get_constraintdef`, `pg_get_indexdef`, `pg_get_viewdef`, `pg_get_functiondef`…) : pas de dépendance à `pg_dump`. Un test d'intégration recrée les tables de démo à partir du DDL généré et vérifie que la structure relue est identique. Non inclus : droits (`GRANT`), propriétaire (`ALTER … OWNER`), politiques RLS, options des séquences d'identité.
 - **Deux connexions par session** : `session` (requêtes utilisateur, écritures, transactions) et `catalog` (métadonnées, toujours en lecture seule), pour que l'arbre et l'autocomplétion ne soient jamais bloqués par une requête longue.
 - **Moteurs futurs** : ajouter un module implémentant `db::Backend` (MySQL, SQLite…) et une branche dans `db::connect`.
 - **Pourquoi `tokio-postgres` plutôt que `sqlx`** : requêtes 100 % dynamiques (pas d'intérêt pour les macros vérifiées à la compilation), annulation native (`CancelToken`), paramètres envoyés au format texte pour laisser Postgres analyser les valeurs saisies — jamais de concaténation.
@@ -177,7 +191,7 @@ Sans `PGTUI_TEST_DATABASE_URL`, les tests d'intégration sont ignorés avec un m
 ## Feuille de route
 
 - [x] **Jalon 1** — config, connexions (TLS, mots de passe, lecture seule, prod), arbre des objets, barre de statut, aide, restauration du terminal
-- [ ] **Jalon 2** — onglet Schema : colonnes, index, contraintes, triggers, FK entrantes/sortantes, DDL, stats
+- [x] **Jalon 2** — onglet Schema : colonnes, index, contraintes, triggers, FK entrantes/sortantes (navigation), DDL coloré et copiable, statistiques
 - [ ] **Jalon 3** — onglet Data en lecture : tableau virtualisé, pagination serveur, tri, recherche, filtres, vue détail, copie
 - [ ] **Jalon 4** — édition, staging, vue diff, commit transactionnel, détection de conflits
 - [ ] **Jalon 5** — onglet SQL : éditeur, exécution, résultats, historique, annulation, transactions manuelles

@@ -24,12 +24,27 @@ fn app_with(names: &[&str], default: Option<&str>) -> App {
     )
 }
 
+/// DB commands among effects.
+fn db(effects: Vec<Effect>) -> Vec<DbCommand> {
+    effects
+        .into_iter()
+        .filter_map(|e| match e {
+            Effect::Db(c) => Some(c),
+            Effect::Copy(_) => None,
+        })
+        .collect()
+}
+
 fn key(app: &mut App, s: &str) -> Vec<DbCommand> {
-    let mut cmds = Vec::new();
+    db(key_effects(app, s))
+}
+
+fn key_effects(app: &mut App, s: &str) -> Vec<Effect> {
+    let mut effects = Vec::new();
     for chord in KeyChord::parse_seq(s).unwrap() {
-        cmds.extend(app.update(Msg::Key(KeyEvent::new(chord.code, chord.mods))));
+        effects.extend(app.update(Msg::Key(KeyEvent::new(chord.code, chord.mods))));
     }
-    cmds
+    effects
 }
 
 fn typed(app: &mut App, text: &str) {
@@ -45,6 +60,7 @@ fn info() -> ServerInfo {
     ServerInfo {
         kind: BackendKind::Postgres,
         version: "17.0".into(),
+        version_num: 170000,
         user: "u".into(),
         database: "d".into(),
         tls: false,
@@ -72,10 +88,10 @@ fn catalog() -> Catalog {
 fn connected_app() -> App {
     let mut app = app_with(&["local"], None);
     key(&mut app, "enter");
-    let cmds = app.update(Msg::Db(DbEvent::Connected {
+    let cmds = db(app.update(Msg::Db(DbEvent::Connected {
         info: info(),
         elapsed: Duration::from_millis(5),
-    }));
+    })));
     assert!(matches!(
         cmds.as_slice(),
         [DbCommand::LoadCatalog {

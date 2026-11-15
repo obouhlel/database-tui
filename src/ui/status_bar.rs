@@ -149,6 +149,31 @@ pub fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
                 (hint(Context::Global, Action::Help), "aide"),
                 (hint(Context::Global, Action::Quit), "quitter"),
             ],
+            (Screen::Main, Focus::Center) if app.tab == crate::app::Tab::Schema => vec![
+                (
+                    format!(
+                        "{}/{}",
+                        hint(Context::Schema, Action::PrevSection),
+                        hint(Context::Schema, Action::NextSection)
+                    ),
+                    "sections",
+                ),
+                (hint(Context::Schema, Action::FollowLink), "table liée"),
+                (hint(Context::Schema, Action::JumpBack), "retour"),
+                (hint(Context::Schema, Action::Copy), "copier"),
+                (
+                    format!(
+                        "{}/{}",
+                        hint(Context::Schema, Action::ScrollLeft),
+                        hint(Context::Schema, Action::ScrollRight)
+                    ),
+                    "défiler",
+                ),
+                (hint(Context::Schema, Action::Refresh), "recharger"),
+                (hint(Context::Global, Action::FocusTree), "arbre"),
+                (hint(Context::Global, Action::Help), "aide"),
+                (hint(Context::Global, Action::Quit), "quitter"),
+            ],
             (Screen::Main, Focus::Center) => vec![
                 (hint(Context::Global, Action::NextTab), "onglet suivant"),
                 ("1/2/3".into(), "onglets"),

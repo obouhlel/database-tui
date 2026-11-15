@@ -1,6 +1,5 @@
-//! Central panel with the Schema | Data | SQL tabs.
-//! Milestone 1 shows the selected object and session details; the tab
-//! contents arrive with milestones 2, 3 and 5.
+//! Central panel with the Schema | Data | SQL tabs. Without an object (or
+//! for tabs not implemented yet) it shows the object and session details.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -8,10 +7,11 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Wrap};
 
+use super::schema_view;
 use crate::app::{App, Focus, Tab};
 
-pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
-    let t = &app.theme;
+pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
+    let t = &app.theme.clone();
     let focused = app.focus == Focus::Center;
 
     let mut title = vec![Span::raw(" ")];
@@ -33,6 +33,13 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
         .border_style(t.border(focused));
     let inner = block.inner(area);
     frame.render_widget(block, area);
+
+    if app.tab == Tab::Schema
+        && let Some(obj) = app.current.clone()
+    {
+        schema_view::draw(frame, app, &obj, inner);
+        return;
+    }
 
     let label = Style::new().fg(t.dim);
     let value = Style::new().fg(t.fg);
@@ -72,9 +79,7 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
             }
             lines.push(Line::default());
             let pending = match app.tab {
-                Tab::Schema => {
-                    "L'onglet Schema (colonnes, index, contraintes, DDL…) arrive au jalon 2."
-                }
+                Tab::Schema => "",
                 Tab::Data if !obj.kind.has_rows() => "Cet objet n'a pas de lignes à afficher.",
                 Tab::Data => "L'onglet Data (tableau paginé, tri, filtres…) arrive au jalon 3.",
                 Tab::Sql => "L'onglet SQL (éditeur, exécution, historique…) arrive au jalon 5.",

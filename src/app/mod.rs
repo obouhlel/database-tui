@@ -1,23 +1,31 @@
 //! Application state and reducer.
 //!
 //! [`App::update`] is the only place where state changes: it takes a [`Msg`]
-//! (key, DB event, tick) and returns the [`DbCommand`]s to send to the worker.
-//! It performs no I/O, which keeps it unit-testable.
+//! (key, DB event, tick) and returns [`Effect`]s (commands for the DB worker,
+//! clipboard writes) that the event loop executes. It performs no I/O, which
+//! keeps it unit-testable.
 
+pub mod format;
+pub mod grid;
 pub mod input;
+pub mod schema_view;
 pub mod tree;
 
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
 
 use crate::config::{Config, ConnectionConfig};
 use crate::db::catalog::{Catalog, ObjectRef};
+use crate::db::schema::ObjectDetails;
 use crate::db::worker::{DbCommand, DbEvent};
 use crate::db::{ConnectRequest, ServerInfo};
 use crate::keymap::{Action, Context, KeyChord, KeyResolver, Keymap, Resolved};
 use crate::ui::theme::Theme;
 use input::{InputOutcome, LineInput};
+use schema_view::{SchemaView, Section};
 use tree::{RowKind, TreeState};
 
 #[derive(Debug)]
@@ -29,6 +37,30 @@ pub enum Msg {
     Db(DbEvent),
     /// SIGTERM / SIGHUP: leave immediately.
     Terminate,
+    /// Feedback from the event loop (e.g. a clipboard failure).
+    Notify(Level, String),
+}
+
+/// Side effects requested by the reducer, executed by the event loop.
+#[derive(Debug)]
+pub enum Effect {
+    Db(DbCommand),
+    /// Put text in the system clipboard.
+    Copy(String),
+}
+
+impl From<DbCommand> for Effect {
+    fn from(c: DbCommand) -> Self {
+        Effect::Db(c)
+    }
+}
+
+/// Loading state of an object's details (Schema tab).
+#[derive(Debug, Clone)]
+pub enum DetailsState {
+    Loading,
+    Loaded(Arc<ObjectDetails>),
+    Failed(String),
 }
 
 impl Msg {
@@ -141,6 +173,8 @@ pub struct Session {
     pub catalog_loading: bool,
     /// Set when the server connection dropped.
     pub lost: Option<String>,
+    /// Schema tab cache, cleared when the catalog is reloaded.
+    pub details: HashMap<ObjectRef, DetailsState>,
 }
 
 /// An in-flight background operation, for the spinner.
@@ -187,6 +221,9 @@ pub struct App {
     pub tab: Tab,
     /// Object opened in the center panel.
     pub current: Option<ObjectRef>,
+    pub schema: SchemaView,
+    /// Objects visited before the current one (Ctrl+o goes back).
+    pub back_stack: Vec<ObjectRef>,
 
     pub overlay: Option<Overlay>,
     pub status: Option<StatusMessage>,
@@ -232,6 +269,8 @@ impl App {
             focus: Focus::Tree,
             tab: Tab::Schema,
             current: None,
+            schema: SchemaView::default(),
+            back_stack: Vec::new(),
             overlay: None,
             status: None,
             busy: None,
@@ -244,7 +283,7 @@ impl App {
     }
 
     /// Commands to run at startup.
-    pub fn init(&mut self) -> Vec<DbCommand> {
+    pub fn init(&mut self) -> Vec<Effect> {
         match self.start.take() {
             Some(Start::Connect { conn, password }) => self.start_connect(*conn, password, true),
             _ => Vec::new(),
@@ -269,6 +308,9 @@ impl App {
         let ctx = match (self.screen, self.focus) {
             (Screen::Picker, _) => Context::Picker,
             (Screen::Main, Focus::Tree) => Context::Tree,
+            (Screen::Main, Focus::Center) if self.tab == Tab::Schema => {
+                return vec![Context::Schema, Context::Center, Context::Global];
+            }
             (Screen::Main, Focus::Center) => Context::Center,
         };
         vec![ctx, Context::Global]
@@ -278,7 +320,13 @@ impl App {
         self.resolver.pending_display()
     }
 
-    pub fn update(&mut self, msg: Msg) -> Vec<DbCommand> {
+    pub fn update(&mut self, msg: Msg) -> Vec<Effect> {
+        let mut effects = self.handle(msg);
+        effects.extend(self.sync_details());
+        effects
+    }
+
+    fn handle(&mut self, msg: Msg) -> Vec<Effect> {
         match msg {
             Msg::Key(k) => {
                 self.dirty = true;
@@ -302,7 +350,54 @@ impl App {
                 self.should_quit = true;
                 Vec::new()
             }
+            Msg::Notify(level, text) => {
+                self.notify(level, text);
+                Vec::new()
+            }
         }
+    }
+
+    /// Requests the details of the object shown in the Schema tab when they
+    /// are not cached, and feeds cached details to the Schema view.
+    fn sync_details(&mut self) -> Vec<Effect> {
+        let Some(obj) = self.current.clone() else {
+            return Vec::new();
+        };
+        let Some(session) = &mut self.session else {
+            return Vec::new();
+        };
+        match session.details.get(&obj) {
+            Some(DetailsState::Loaded(d)) => {
+                let shown = self
+                    .schema
+                    .details
+                    .as_ref()
+                    .is_some_and(|s| Arc::ptr_eq(s, d));
+                if !shown {
+                    self.schema.show(d.clone());
+                    self.dirty = true;
+                }
+                Vec::new()
+            }
+            Some(_) => Vec::new(),
+            None if self.tab == Tab::Schema
+                && session.lost.is_none()
+                && session.catalog.is_some() =>
+            {
+                session.details.insert(obj.clone(), DetailsState::Loading);
+                if self.schema.object.as_ref() != Some(&obj) {
+                    self.schema.clear();
+                }
+                vec![DbCommand::LoadDetails(obj).into()]
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// Details state of the current object, for the renderer.
+    pub fn current_details(&self) -> Option<&DetailsState> {
+        let obj = self.current.as_ref()?;
+        self.session.as_ref()?.details.get(obj)
     }
 
     pub fn notify(&mut self, level: Level, text: impl Into<String>) {
@@ -320,7 +415,7 @@ impl App {
         self.dirty = true;
     }
 
-    fn on_tick(&mut self) -> Vec<DbCommand> {
+    fn on_tick(&mut self) -> Vec<Effect> {
         let now = Instant::now();
         let mut cmds = Vec::new();
         if self.resolver.is_pending() {
@@ -359,7 +454,7 @@ impl App {
 
     // ----------------------------------------------------------------- keys
 
-    fn on_key(&mut self, key: KeyEvent) -> Vec<DbCommand> {
+    fn on_key(&mut self, key: KeyEvent) -> Vec<Effect> {
         if self.overlay.is_some() {
             return self.on_overlay_key(key);
         }
@@ -402,7 +497,7 @@ impl App {
         }
     }
 
-    fn on_overlay_key(&mut self, key: KeyEvent) -> Vec<DbCommand> {
+    fn on_overlay_key(&mut self, key: KeyEvent) -> Vec<Effect> {
         let Some(overlay) = self.overlay.as_mut() else {
             return Vec::new();
         };
@@ -462,7 +557,7 @@ impl App {
 
     // -------------------------------------------------------------- actions
 
-    fn dispatch(&mut self, action: Action) -> Vec<DbCommand> {
+    fn dispatch(&mut self, action: Action) -> Vec<Effect> {
         use Action::*;
         match action {
             Quit => self.should_quit = true,
@@ -494,12 +589,134 @@ impl App {
             TabSql => self.tab = Tab::Sql,
             ReloadCatalog => return self.reload_catalog(),
             _ if self.focus == Focus::Tree => self.dispatch_tree(action),
+            _ if self.tab == Tab::Schema => return self.dispatch_schema(action),
             _ => {}
         }
         Vec::new()
     }
 
-    fn dispatch_picker(&mut self, action: Action) -> Vec<DbCommand> {
+    fn dispatch_schema(&mut self, action: Action) -> Vec<Effect> {
+        use Action::*;
+        match action {
+            NextSection => self.schema.cycle_section(1),
+            PrevSection => self.schema.cycle_section(-1),
+            JumpBack => match self.back_stack.pop() {
+                Some(prev) => self.go_to(prev),
+                None => self.notify(Level::Info, "Pas d'objet précédent"),
+            },
+            FollowLink => {
+                let target = self.schema.table().and_then(|t| t.selected_link()).cloned();
+                match target {
+                    Some(t) => {
+                        if let Some(cur) = self.current.take() {
+                            self.back_stack.push(cur);
+                        }
+                        self.go_to(t);
+                    }
+                    None => {
+                        if matches!(
+                            self.schema.current_section(),
+                            Some(Section::Columns | Section::Relations)
+                        ) {
+                            self.notify(Level::Info, "Pas de table liée sur cette ligne");
+                        }
+                    }
+                }
+            }
+            Copy => return self.copy_schema(),
+            Refresh => {
+                if let (Some(obj), Some(s)) = (&self.current, &mut self.session) {
+                    s.details.remove(obj);
+                }
+            }
+            _ => self.navigate_schema(action),
+        }
+        Vec::new()
+    }
+
+    fn navigate_schema(&mut self, action: Action) {
+        use Action::*;
+        if self.schema.current_section() == Some(Section::Ddl) {
+            let lines = self.schema.ddl_lines;
+            let t = &mut self.schema.ddl;
+            let half = (t.viewport / 2).max(1) as isize;
+            let page = t.viewport.saturating_sub(1).max(1) as isize;
+            match action {
+                Up => t.scroll_by(-1, lines),
+                Down => t.scroll_by(1, lines),
+                Top => t.scroll = 0,
+                Bottom => t.scroll_by(isize::MAX / 2, lines),
+                HalfPageDown => t.scroll_by(half, lines),
+                HalfPageUp => t.scroll_by(-half, lines),
+                PageDown => t.scroll_by(page, lines),
+                PageUp => t.scroll_by(-page, lines),
+                ScrollLeft => t.hscroll = t.hscroll.saturating_sub(4),
+                ScrollRight => t.hscroll += 4,
+                FirstColumn => t.hscroll = 0,
+                _ => {}
+            }
+            return;
+        }
+        let Some(table) = self.schema.table_mut() else {
+            return;
+        };
+        let rows = table.grid.rows.len();
+        let cols = table.grid.headers.len();
+        let frozen = table.grid.frozen;
+        let st = &mut table.state;
+        match action {
+            Up => st.move_by(-1, rows),
+            Down => st.move_by(1, rows),
+            Top => st.top(),
+            Bottom => st.bottom(rows),
+            HalfPageDown => st.move_by(st.half_page(), rows),
+            HalfPageUp => st.move_by(-st.half_page(), rows),
+            PageDown => st.move_by(st.page(), rows),
+            PageUp => st.move_by(-st.page(), rows),
+            ScrollLeft => st.scroll_cols(-1, cols, frozen),
+            ScrollRight => st.scroll_cols(1, cols, frozen),
+            FirstColumn => st.col_offset = 0,
+            LastColumn => st.scroll_cols(isize::MAX / 2, cols, frozen),
+            _ => {}
+        }
+    }
+
+    fn copy_schema(&mut self) -> Vec<Effect> {
+        if self.schema.current_section() == Some(Section::Ddl) {
+            let Some(d) = &self.schema.details else {
+                return Vec::new();
+            };
+            let text = d.ddl.clone();
+            self.notify(
+                Level::Success,
+                format!("DDL copié ({} lignes)", text.lines().count()),
+            );
+            return vec![Effect::Copy(text)];
+        }
+        let Some(t) = self.schema.table() else {
+            return Vec::new();
+        };
+        match t.grid.row_tsv(t.state.row) {
+            Some(text) => {
+                self.notify(Level::Success, "Ligne copiée (TSV)");
+                vec![Effect::Copy(text)]
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// Opens `obj` in the center panel and reveals it in the tree.
+    fn go_to(&mut self, obj: ObjectRef) {
+        if let Some(catalog) = self.session.as_ref().and_then(|s| s.catalog.as_ref()) {
+            if !self.tree.filter.is_empty() {
+                self.tree.filter.clear();
+            }
+            self.tree.reveal(catalog, &obj);
+        }
+        self.current = Some(obj);
+    }
+
+    fn dispatch_picker(&mut self, action: Action) -> Vec<Effect> {
         let n = self.connections.len();
         if n == 0 {
             return Vec::new();
@@ -569,6 +786,11 @@ impl App {
         if !obj.kind.has_rows() && self.tab == Tab::Data {
             self.tab = Tab::Schema;
         }
+        if let Some(cur) = self.current.take()
+            && cur != obj
+        {
+            self.back_stack.push(cur);
+        }
         self.current = Some(obj);
         self.focus = Focus::Center;
     }
@@ -582,7 +804,7 @@ impl App {
     // ------------------------------------------------------------- commands
 
     /// `:` command line. The full fuzzy palette comes in milestone 6.
-    fn run_command(&mut self, line: &str) -> Vec<DbCommand> {
+    fn run_command(&mut self, line: &str) -> Vec<Effect> {
         let mut parts = line.split_whitespace();
         let Some(cmd) = parts.next() else {
             return Vec::new();
@@ -602,9 +824,11 @@ impl App {
             "connections" | "disconnect" => {
                 self.session = None;
                 self.current = None;
+                self.schema = SchemaView::default();
+                self.back_stack.clear();
                 self.tree = TreeState::default();
                 self.screen = Screen::Picker;
-                return vec![DbCommand::Disconnect];
+                return vec![DbCommand::Disconnect.into()];
             }
             "connect" | "c" => {
                 let Some(name) = arg else {
@@ -648,24 +872,27 @@ impl App {
         conn: ConnectionConfig,
         password: Option<String>,
         resolve: bool,
-    ) -> Vec<DbCommand> {
+    ) -> Vec<Effect> {
         let statement_timeout_secs = conn.statement_timeout(&self.config.general);
         self.connecting = Some((conn.clone(), Instant::now()));
         self.busy = Some(Busy {
             label: format!("Connexion à {}…", conn.name),
             since: Instant::now(),
         });
-        vec![DbCommand::Connect {
-            request: Box::new(ConnectRequest {
-                conn,
-                password,
-                statement_timeout_secs,
-            }),
-            resolve_password: resolve,
-        }]
+        vec![
+            DbCommand::Connect {
+                request: Box::new(ConnectRequest {
+                    conn,
+                    password,
+                    statement_timeout_secs,
+                }),
+                resolve_password: resolve,
+            }
+            .into(),
+        ]
     }
 
-    fn reload_catalog(&mut self) -> Vec<DbCommand> {
+    fn reload_catalog(&mut self) -> Vec<Effect> {
         let Some(s) = &mut self.session else {
             return Vec::new();
         };
@@ -678,12 +905,15 @@ impl App {
             label: "Chargement du catalogue…".into(),
             since: Instant::now(),
         });
-        vec![DbCommand::LoadCatalog {
-            include_system: self.config.general.show_system_schemas,
-        }]
+        vec![
+            DbCommand::LoadCatalog {
+                include_system: self.config.general.show_system_schemas,
+            }
+            .into(),
+        ]
     }
 
-    fn on_db(&mut self, ev: DbEvent) -> Vec<DbCommand> {
+    fn on_db(&mut self, ev: DbEvent) -> Vec<Effect> {
         match ev {
             DbEvent::Connected { info, elapsed } => {
                 let Some((conn, _)) = self.connecting.take() else {
@@ -701,6 +931,8 @@ impl App {
                 if !same {
                     self.tree = TreeState::default();
                     self.current = None;
+                    self.schema = SchemaView::default();
+                    self.back_stack.clear();
                     self.focus = Focus::Tree;
                 }
                 let catalog = if same {
@@ -723,6 +955,7 @@ impl App {
                     catalog,
                     catalog_loading: false,
                     lost: None,
+                    details: HashMap::new(),
                 });
                 self.screen = Screen::Main;
                 self.reload_catalog()
@@ -759,6 +992,7 @@ impl App {
                 });
                 if let Some(s) = &mut self.session {
                     s.catalog_loading = false;
+                    s.details.clear();
                     self.tree.rebuild(&catalog);
                     // Drop the current object if it no longer exists.
                     if let Some(cur) = &self.current {
@@ -771,6 +1005,7 @@ impl App {
                         });
                         if !exists {
                             self.current = None;
+                            self.schema = SchemaView::default();
                         }
                     }
                     s.catalog = Some(catalog);
@@ -784,6 +1019,25 @@ impl App {
                     s.catalog_loading = false;
                 }
                 self.notify(Level::Error, format!("Catalogue : {e}"));
+                Vec::new()
+            }
+            DbEvent::DetailsLoaded { details, elapsed } => {
+                self.last_op = Some(LastOp {
+                    label: "détails".into(),
+                    elapsed,
+                });
+                if let Some(s) = &mut self.session {
+                    s.details.insert(
+                        details.object.clone(),
+                        DetailsState::Loaded(Arc::new(*details)),
+                    );
+                }
+                Vec::new()
+            }
+            DbEvent::DetailsFailed { object, error } => {
+                if let Some(s) = &mut self.session {
+                    s.details.insert(object, DetailsState::Failed(error));
+                }
                 Vec::new()
             }
             DbEvent::ConnectionLost(e) => {

@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use ratatui::style::{Color, Modifier, Style};
 
+use crate::app::grid::CellStyle;
 use crate::config::parse_color;
 use crate::db::catalog::ObjectKind;
 
@@ -31,6 +32,8 @@ theme! {
     matched,
     schema, table, view, matview, sequence, function,
     null, prod_banner_bg, prod_banner_fg,
+    header_bg, key, link,
+    sql_keyword, sql_type, sql_string, sql_number, sql_comment, line_number,
 }
 
 impl Theme {
@@ -63,6 +66,15 @@ impl Theme {
             null: Color::Rgb(0x56, 0x5f, 0x89),
             prod_banner_bg: Color::Rgb(0xc5, 0x3b, 0x53),
             prod_banner_fg: Color::Rgb(0xff, 0xff, 0xff),
+            header_bg: Color::Rgb(0x1f, 0x23, 0x35),
+            key: Color::Rgb(0xe0, 0xaf, 0x68),
+            link: Color::Rgb(0x7d, 0xcf, 0xff),
+            sql_keyword: Color::Rgb(0xbb, 0x9a, 0xf7),
+            sql_type: Color::Rgb(0x2a, 0xc3, 0xde),
+            sql_string: Color::Rgb(0x9e, 0xce, 0x6a),
+            sql_number: Color::Rgb(0xff, 0x9e, 0x64),
+            sql_comment: Color::Rgb(0x56, 0x5f, 0x89),
+            line_number: Color::Rgb(0x3b, 0x42, 0x61),
         }
     }
 
@@ -95,6 +107,15 @@ impl Theme {
             null: Color::Rgb(0x9a, 0xa0, 0xbd),
             prod_banner_bg: Color::Rgb(0xc6, 0x43, 0x43),
             prod_banner_fg: Color::Rgb(0xff, 0xff, 0xff),
+            header_bg: Color::Rgb(0xd5, 0xd6, 0xdb),
+            key: Color::Rgb(0x8c, 0x6c, 0x3e),
+            link: Color::Rgb(0x16, 0x67, 0x75),
+            sql_keyword: Color::Rgb(0x5a, 0x4a, 0x78),
+            sql_type: Color::Rgb(0x16, 0x67, 0x75),
+            sql_string: Color::Rgb(0x48, 0x5e, 0x30),
+            sql_number: Color::Rgb(0xb1, 0x5c, 0x00),
+            sql_comment: Color::Rgb(0x84, 0x8c, 0xb5),
+            line_number: Color::Rgb(0xa8, 0xae, 0xcb),
         }
     }
 
@@ -144,6 +165,20 @@ impl Theme {
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::new().bg(self.selection_inactive_bg)
+        }
+    }
+
+    pub fn cell(&self, style: CellStyle) -> Style {
+        match style {
+            CellStyle::Normal => Style::new().fg(self.fg),
+            CellStyle::Dim => Style::new().fg(self.dim),
+            CellStyle::Null => Style::new().fg(self.null).add_modifier(Modifier::ITALIC),
+            CellStyle::Key => Style::new().fg(self.key).add_modifier(Modifier::BOLD),
+            CellStyle::Link => Style::new()
+                .fg(self.link)
+                .add_modifier(Modifier::UNDERLINED),
+            CellStyle::Accent => Style::new().fg(self.accent),
+            CellStyle::Warning => Style::new().fg(self.warning),
         }
     }
 
