@@ -43,8 +43,12 @@ TMUX
 
 start() { # args, width, height
   tmux -f "$WORK/tmux.conf" kill-server 2>/dev/null || true
-  tmux -f "$WORK/tmux.conf" new-session -d -s pg -x "$2" -y "$3" \
-    "env XDG_CONFIG_HOME=$WORK/config XDG_STATE_HOME=$WORK/state COLORTERM=truecolor $BIN $1; sleep 120"
+  # Restarting tmux right after kill-server can race: retry.
+  for _ in 1 2 3 4 5; do
+    sleep 0.5
+    tmux -f "$WORK/tmux.conf" new-session -d -s pg -x "$2" -y "$3" \
+      "env XDG_CONFIG_HOME=$WORK/config XDG_STATE_HOME=$WORK/state COLORTERM=truecolor $BIN $1; sleep 120" && break
+  done
   sleep 1.5
 }
 keys() { for k in "$@"; do tmux send-keys -t pg "$k"; sleep 0.15; done; sleep 0.6; }
@@ -64,5 +68,13 @@ keys Enter '?'; shot 07-aide "pgtui — aide"
 start "--connection prod-demo" 140 24
 keys / p r o d u c t s Enter Enter; sleep 0.5; keys ']' ']'; shot 08-prod "pgtui — connexion de production"
 
+start "--connection demo" 150 30
+keys / c u s t o m e r s Enter Enter 2; sleep 1; shot 09-data "pgtui — Data : customers"
+keys j l l l; keys / Z o é Enter; sleep 0.3; shot 10-data-recherche "pgtui — Data : recherche"
+keys Escape f; keys BTab I; keys Tab; keys '%' z o '%'; sleep 0.3; shot 11-data-filtre "pgtui — Data : filtre par colonne"
+keys Escape; keys g g j Enter; keys j j j j j j j j j j j j j j; sleep 0.3; shot 12-data-detail "pgtui — Data : détail d'une ligne"
+keys Escape; keys C-h / o r d e r s Enter Enter; sleep 1
+keys '$' h s s; sleep 1; keys V j j j; shot 13-data-tri "pgtui — Data : tri décroissant et sélection"
+
 mkdir -p "$ROOT/docs/screenshots"
-node "$HERE/render.js" "$ROOT/docs/screenshots" "$WORK"/0*.html
+node "$HERE/render.js" "$ROOT/docs/screenshots" "$WORK"/[0-9]*.html

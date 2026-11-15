@@ -4,6 +4,7 @@ that looks like a terminal window. Usage: ansi2html.py in.ans out.html "title"
 import html
 import re
 import sys
+import unicodedata
 
 FG, BG = "#c0caf5", "#1a1b26"
 BASE16 = [
@@ -87,6 +88,18 @@ def style(state):
     return ";".join(css)
 
 
+def cells(chunk):
+    """Escapes text and pins double-width characters (CJK, emoji) to exactly
+    two cells, as the terminal does; fallback fonts are often wider."""
+    out = []
+    for ch in chunk:
+        if unicodedata.east_asian_width(ch) in ("W", "F"):
+            out.append(f'<span style="display:inline-block;width:2ch;overflow:hidden;vertical-align:bottom">{html.escape(ch)}</span>')
+        else:
+            out.append(html.escape(ch))
+    return "".join(out)
+
+
 def convert(text):
     out = []
     for line in text.rstrip("\n").split("\n"):
@@ -96,7 +109,7 @@ def convert(text):
             if m:
                 apply(state, m.group(1))
             elif chunk:
-                parts.append(f'<span style="{style(state)}">{html.escape(chunk)}</span>')
+                parts.append(f'<span style="{style(state)}">{cells(chunk)}</span>')
         out.append("".join(parts) or " ")
     return "\n".join(out)
 

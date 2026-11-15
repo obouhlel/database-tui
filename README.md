@@ -2,17 +2,18 @@
 
 Client PostgreSQL en mode texte (TUI), entièrement pilotable au clavier — une alternative légère à DBeaver pour l'usage quotidien.
 
-> **État : jalon 2 / 6** — configuration, connexions, arbre des objets, onglet Schema (colonnes, index, contraintes, triggers, relations, DDL, statistiques).
-> Les onglets Data et SQL arrivent aux jalons suivants (voir [Feuille de route](#feuille-de-route)).
+> **État : jalon 3 / 6** — connexions, arbre des objets, onglet Schema, onglet Data en lecture (pagination serveur, tri, filtres, recherche, détail, copie).
+> L'édition et l'onglet SQL arrivent aux jalons suivants (voir [Feuille de route](#feuille-de-route)).
 
 ## Captures
 
-![Onglet Schema : colonnes](docs/screenshots/02-schema-colonnes.png)
+![Onglet Data : recherche](docs/screenshots/10-data-recherche.png)
 
 | | |
 |---|---|
-| ![Sélecteur de connexion](docs/screenshots/01-selecteur.png) | ![DDL](docs/screenshots/04-ddl.png) |
-| ![Relations](docs/screenshots/03-relations.png) | ![Connexion de production](docs/screenshots/08-prod.png) |
+| ![Onglet Schema : colonnes](docs/screenshots/02-schema-colonnes.png) | ![DDL](docs/screenshots/04-ddl.png) |
+| ![Filtre par colonne](docs/screenshots/11-data-filtre.png) | ![Détail d'une ligne](docs/screenshots/12-data-detail.png) |
+| ![Tri et sélection](docs/screenshots/13-data-tri.png) | ![Connexion de production](docs/screenshots/08-prod.png) |
 
 Captures du vrai binaire, régénérables avec `scripts/screenshots/capture.sh` (tmux, Python, Node + Playwright, base de démo lancée).
 
@@ -110,7 +111,7 @@ quit = ["q", "ctrl+q"]
 expand = ["l", "right", "enter"]
 ```
 
-Contextes : `global`, `picker`, `tree`, `center`, `schema`. Notation : `ctrl+p`, `alt+enter`, `shift+tab`, `f5`, `space`, `gg` (séquence), `ctrl+w h` (séquence avec modificateur). La liste des actions et leur nom figurent dans l'aide (`?`). Une surcharge remplace les touches par défaut de l'action, et une touche réaffectée est retirée de son ancienne action.
+Contextes : `global`, `picker`, `tree`, `center`, `schema`, `data`. Notation : `ctrl+p`, `alt+enter`, `shift+tab`, `f5`, `space`, `gg` (séquence), `ctrl+w h` (séquence avec modificateur). La liste des actions et leur nom figurent dans l'aide (`?`). Une surcharge remplace les touches par défaut de l'action, et une touche réaffectée est retirée de son ancienne action.
 
 ### Thème
 
@@ -153,6 +154,18 @@ Couleurs : noms (`red`, `light-blue`, `orange`…), `#rrggbb` ou index ANSI (`20
 | | `Ctrl+o` · `Backspace` | Revenir à l'objet précédent |
 | | `y` | Copier le DDL complet (section DDL) ou la ligne courante en TSV |
 | | `R` | Recharger les détails |
+| Onglet Data | `h`/`j`/`k`/`l` · flèches | Déplacer le curseur de cellule |
+| | `gg` / `G`, `Ctrl+d`/`Ctrl+u`, `PgUp`/`PgDn` | Début / fin / demi-page / page (chargement paresseux) |
+| | `0`/`^` / `$`, `w` / `b` | Première / dernière colonne, colonne suivante / précédente |
+| | `Enter` | Vue détail de la ligne (JSON indenté, bytea, textes longs ; `[`/`]` ligne préc./suiv., `y` copie en JSON) |
+| | `/`, `n` / `N` | Rechercher dans les valeurs chargées (insensible à la casse sauf majuscule), occurrence suivante / précédente |
+| | `f` | Filtre par colonne (`=`, `!=`, `<`, `<=`, `>`, `>=`, `LIKE`, `ILIKE`, `~`, `~*`, `IS NULL`, `IS NOT NULL`, AND / OR) |
+| | `F` / `C` | Filtre SQL libre (`WHERE …`) / effacer tous les filtres |
+| | `s` / `S` | Trier sur la colonne (asc → desc → aucun, multi-colonnes) / effacer le tri |
+| | `v` / `V` | Sélection de cellules / de lignes (`Esc` pour sortir) |
+| | `y`, `yy`, `Y` | Copier la cellule (ou la sélection), la ligne, ou la sélection au choix TSV / CSV / JSON / INSERT |
+| | `<` / `>` / `=`, `-` / `+` | Rétrécir / élargir / largeur auto, masquer la colonne / tout réafficher |
+| | `R`, `Ctrl+c` | Relancer la requête, annuler une requête en cours |
 
 **Presse-papier** — `auto` utilise le presse-papier système (X11, Wayland, macOS, Windows) et bascule sur la séquence OSC 52 (copie via le terminal) en SSH ou si le presse-papier système est indisponible. Sous tmux, OSC 52 demande `set -g set-clipboard on`.
 
@@ -182,6 +195,7 @@ src/
 ```
 
 - **Séparation état / rendu / I/O** : l'UI ne fait jamais d'appel DB. Le reducer renvoie des `Effect` (commande DB, copie) que la boucle exécute ; le worker répond par des `DbEvent`.
+- **Onglet Data** : chaque colonne est lue en texte (`col::text`), ce qui couvre tous les types (y compris PostGIS, ranges, enums) ; l'affichage s'adapte au type (nombres alignés à droite, JSON indenté, bytea en hexadécimal tronqué, `NULL` distinct de la chaîne vide). Les valeurs des filtres partent en paramètres `$n` convertis côté serveur (`CAST($1::text AS numeric(12,2))`), jamais concaténées. Pagination `LIMIT/OFFSET` triée sur la clé, fenêtre glissante de 10 pages en mémoire, comptage borné à 1 000 000 lignes pour rester rapide sur les grosses tables.
 - **DDL reconstruit depuis le catalogue** (`pg_get_constraintdef`, `pg_get_indexdef`, `pg_get_viewdef`, `pg_get_functiondef`…) : pas de dépendance à `pg_dump`. Un test d'intégration recrée les tables de démo à partir du DDL généré et vérifie que la structure relue est identique. Non inclus : droits (`GRANT`), propriétaire (`ALTER … OWNER`), politiques RLS, options des séquences d'identité.
 - **Deux connexions par session** : `session` (requêtes utilisateur, écritures, transactions) et `catalog` (métadonnées, toujours en lecture seule), pour que l'arbre et l'autocomplétion ne soient jamais bloqués par une requête longue.
 - **Moteurs futurs** : ajouter un module implémentant `db::Backend` (MySQL, SQLite…) et une branche dans `db::connect`.
@@ -203,7 +217,7 @@ Sans `PGTUI_TEST_DATABASE_URL`, les tests d'intégration sont ignorés avec un m
 
 - [x] **Jalon 1** — config, connexions (TLS, mots de passe, lecture seule, prod), arbre des objets, barre de statut, aide, restauration du terminal
 - [x] **Jalon 2** — onglet Schema : colonnes, index, contraintes, triggers, FK entrantes/sortantes (navigation), DDL coloré et copiable, statistiques
-- [ ] **Jalon 3** — onglet Data en lecture : tableau virtualisé, pagination serveur, tri, recherche, filtres, vue détail, copie
+- [x] **Jalon 3** — onglet Data en lecture : tableau virtualisé, pagination serveur, tri, recherche, filtres, vue détail, copie
 - [ ] **Jalon 4** — édition, staging, vue diff, commit transactionnel, détection de conflits
 - [ ] **Jalon 5** — onglet SQL : éditeur, exécution, résultats, historique, annulation, transactions manuelles
 - [ ] **Jalon 6** — autocomplétion, EXPLAIN, export, finitions
