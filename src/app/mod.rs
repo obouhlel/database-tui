@@ -673,18 +673,47 @@ impl App {
 
     fn on_paste(&mut self, s: &str) {
         let sql_editor = self.sql_editor_focused();
+        // Single-line inputs: line breaks become nothing, and the blanks
+        // around a copied value (a cell copy ends with a newline) are dropped.
+        let line = s.trim();
         match &mut self.overlay {
             Some(Overlay::Command(input)) | Some(Overlay::Password { input, .. }) => {
-                input.insert_str(s)
+                input.insert_str(line)
             }
             _ if self.tree.filter_editing => {
-                self.tree.filter.insert_str(s);
+                self.tree.filter.insert_str(line);
                 self.filter_changed();
             }
             Some(Overlay::CellEditor(ed)) => match &mut ed.input {
                 edit::EditorInput::Line(l) => l.insert_str(s),
                 edit::EditorInput::Multi(t) => t.insert_str(s),
             },
+            Some(Overlay::FilterEditor(editor)) => editor.paste(s),
+            Some(Overlay::FreeWhere(input)) => input.insert_str(&s.replace(['\n', '\r'], " ")),
+            Some(Overlay::ConfirmApply { input, .. }) => input.insert_str(line),
+            Some(Overlay::Login(form)) => form.fields[form.field].insert_str(line),
+            Some(Overlay::Export(d)) => {
+                d.path.insert_str(line);
+                d.edited = true;
+            }
+            Some(Overlay::HistorySearch(h)) => {
+                h.input.insert_str(line);
+                let Some(Overlay::HistorySearch(mut h)) = self.overlay.take() else {
+                    unreachable!()
+                };
+                self.rank_history(&mut h);
+                self.overlay = Some(Overlay::HistorySearch(h));
+            }
+            Some(Overlay::DataSearch { input, .. }) => {
+                input.insert_str(line);
+                let text = input.text().to_string();
+                let search = move |app: &mut App| app.incremental_search(&text);
+                if self.tab == Tab::Sql {
+                    self.with_results(search);
+                } else {
+                    search(self);
+                }
+            }
             None if sql_editor => self.on_sql_paste(s),
             _ => {}
         }
@@ -1266,6 +1295,13 @@ impl App {
             }
             "save" | "w" => return self.save_query(arg),
             "open" | "e" => return self.open_query(arg),
+            "new" | "enew" => self.new_script(),
+            "close" => self.close_script(),
+            "clear" => {
+                self.sql.editor.set_text("");
+                self.switch_tab(Tab::Sql);
+                self.notify(Level::Info, "Script vidé (u / Ctrl+z pour annuler)");
+            }
             "history" => {
                 self.tab = Tab::Sql;
                 self.focus = Focus::Center;

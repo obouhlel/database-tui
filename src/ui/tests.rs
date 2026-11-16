@@ -247,3 +247,44 @@ fn tiny_terminal_does_not_panic() {
         render(&mut app, w, h);
     }
 }
+
+#[test]
+fn production_confirmation_cursor_follows_the_input() {
+    use crate::app::Overlay;
+    use crate::app::input::LineInput;
+    use crate::db::catalog::ObjectRef;
+
+    let mut app = app(ConnectionConfig::named("prod-eu"));
+    connect(&mut app);
+    app.data.object = Some(ObjectRef {
+        connection: "prod-eu".into(),
+        database: "demo".into(),
+        schema: "shop".into(),
+        name: "customers".into(),
+        kind: ObjectKind::Table,
+        signature: None,
+    });
+    app.overlay = Some(Overlay::ConfirmApply {
+        script: None,
+        production: true,
+        input: LineInput::with_text("prod"),
+        counts: Default::default(),
+        previous: None,
+    });
+    // Narrow and wide terminals: the explanation wraps differently, the
+    // cursor must stay right after the typed text.
+    for (w, h) in [(120, 30), (60, 30), (40, 30)] {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| super::draw(f, &mut app)).unwrap();
+        let pos = term.get_cursor_position().unwrap();
+        let buf = term.backend().buffer().clone();
+        let row: String = (0..w)
+            .map(|x| buf[(x, pos.y)].symbol().to_string())
+            .collect();
+        let at = row
+            .find("> prod")
+            .unwrap_or_else(|| panic!("{w}x{h}: {row:?}"));
+        let prompt_x = row[..at].chars().count() as u16;
+        assert_eq!(pos.x, prompt_x + 6, "{w}x{h}: {row:?}");
+    }
+}

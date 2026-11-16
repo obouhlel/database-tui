@@ -43,6 +43,13 @@ pub const COMMANDS: &[(&str, bool, &str)] = &[
     ("disconnect", false, "Fermer la connexion courante"),
     ("save", true, "Enregistrer la requête de l'onglet SQL"),
     ("open", true, "Ouvrir une requête enregistrée"),
+    (
+        "new",
+        false,
+        "Nouveau script SQL (les autres sont conservés)",
+    ),
+    ("close", false, "Fermer le script SQL courant"),
+    ("clear", false, "Vider le script SQL courant (annulable)"),
     ("history", false, "Rechercher dans l'historique SQL"),
     ("schema", false, "Onglet Schema"),
     ("data", false, "Onglet Data"),
@@ -54,7 +61,17 @@ pub fn is_command(word: &str) -> bool {
     COMMANDS.iter().any(|(n, _, _)| *n == word)
         || matches!(
             word,
-            "q" | "q!" | "quit!" | "qa" | "qa!" | "h" | "refresh" | "conn" | "c" | "w" | "e"
+            "q" | "q!"
+                | "quit!"
+                | "qa"
+                | "qa!"
+                | "h"
+                | "refresh"
+                | "conn"
+                | "c"
+                | "w"
+                | "e"
+                | "enew"
         )
 }
 

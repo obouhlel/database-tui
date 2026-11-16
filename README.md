@@ -101,7 +101,8 @@ Rien n'est écrit en base tant que vous n'avez pas validé : chaque modification
 - **Transactions manuelles** : `BEGIN`, `COMMIT`, `ROLLBACK` s'exécutent tels quels. La barre de statut et l'en-tête affichent « TRANSACTION » (et « TRANSACTION EN ÉCHEC » après une erreur, jusqu'au `ROLLBACK`). La cible reste fixe tant que la transaction est ouverte. Quitter ou fermer la connexion pendant une transaction demande confirmation (le serveur l'annule). L'application des changements de l'onglet Data est refusée sur une base où une transaction SQL est ouverte.
 - **Garde-fou** : un `UPDATE` ou un `DELETE` sans `WHERE` (hors sous-requêtes) demande une confirmation explicite avant l'exécution.
 - **Historique** persistant dans `~/.local/share/pgtui/history` (une ligne JSON par instruction : date, connexion, base, texte, succès, durée ; fichier en mode 600 ; 5 000 entrées). `Ctrl+r` (ou `:history`) ouvre une recherche floue, avec aperçu ; `Entrée` insère l'instruction dans l'éditeur.
-- **Requêtes enregistrées** dans `~/.local/share/pgtui/queries/<nom>.sql` : `:save <nom>` (ou `:w`, sans nom pour réenregistrer), `:open <nom>` (ou `:e`), `:open` seul pour choisir dans la liste.
+- **Plusieurs scripts** ouverts à la fois : `Ctrl+t` (ou `:new`) ouvre un script vide sans toucher aux autres, `Alt+←` / `Alt+→` (ou `Ctrl+PgUp` / `Ctrl+PgDn`) passe de l'un à l'autre, `Alt+w` (ou `:close`) ferme le script courant (le dernier est seulement vidé). `:clear` vide le script courant (annulable). Les scripts ouverts apparaissent dans l'en-tête de l'onglet.
+- **Requêtes enregistrées** dans `~/.local/share/pgtui/queries/<nom>.sql` : `:save <nom>` (ou `:w`, sans nom pour réenregistrer), `:open <nom>` (ou `:e`), `:open` seul pour choisir dans la liste. Si le script courant n'est pas vide, la requête s'ouvre dans un nouveau script.
 - **Autocomplétion** (`Ctrl+Espace` ou `Ctrl+n`) selon le contexte : après `FROM`, `JOIN`, `UPDATE`, `INTO`, les tables et vues (qualifiées hors du `search_path`) et les schémas ; après `alias.` ou `table.`, les colonnes de cette table (alias résolus dans l'instruction courante) ; après `schéma.`, ses objets et fonctions ; ailleurs, les colonnes des tables de l'instruction, puis les mots-clés, fonctions et tables. La liste suit la frappe ; `Tab` ou `Entrée` insère, `Esc` ferme. Les colonnes de la base sont chargées une fois, à la première demande, par la connexion de catalogue.
 - **EXPLAIN** : `F6` affiche le plan estimé de l'instruction sous le curseur, `F7` le plan réel (`EXPLAIN ANALYZE, BUFFERS`). Le plan est un arbre : coût, lignes estimées et réelles, durée, boucles, conditions, tri, lignes écartées par les filtres, et la part du travail propre à chaque nœud (en rouge au-delà de 30 %). Une estimation fausse d'un facteur 10 est signalée. `EXPLAIN ANALYZE` exécute l'instruction dans une transaction annulée (ou un savepoint si une transaction est ouverte) : un `UPDATE` analysé ne modifie rien. `y` copie le plan en texte.
 - **Résultats modifiables** : quand toutes les colonnes d'un `SELECT` viennent telles quelles d'une seule table (sans alias de colonne, sans expression) et que sa clé primaire en fait partie, le résultat s'édite comme l'onglet Data : `e`, `o`, `dd`, `u`, `D`, `Ctrl+s`, avec la même transaction unique et la même détection de conflits. L'instruction est relancée après l'application. La barre des résultats indique « modifiable (schéma.table) ». La table est reconnue grâce aux métadonnées du protocole (OID de la table d'origine de chaque colonne).
@@ -260,6 +261,7 @@ Couleurs : noms (`red`, `light-blue`, `orange`…), `#rrggbb` ou index ANSI (`20
 | | `Enter` | Vue détail de la ligne (JSON indenté, bytea, textes longs ; `[`/`]` ligne préc./suiv., `y` copie en JSON) |
 | | `/`, `n` / `N` | Rechercher dans les valeurs chargées (insensible à la casse sauf majuscule), occurrence suivante / précédente |
 | | `f` | Filtre par colonne (`=`, `!=`, `<`, `<=`, `>`, `>=`, `LIKE`, `ILIKE`, `~`, `~*`, `IS NULL`, `IS NOT NULL`, AND / OR) |
+| | `*` | Filtrer sur la valeur de la cellule (`colonne = valeur`, `IS NULL` pour NULL ; remplace le filtre sur cette colonne) |
 | | `F` / `C` | Filtre SQL libre (`WHERE …`) / effacer tous les filtres |
 | | `s` / `S` | Trier sur la colonne (asc → desc → aucun, multi-colonnes) / effacer le tri |
 | | `v` / `V` | Sélection de cellules / de lignes (`Esc` pour sortir) |
@@ -274,6 +276,8 @@ Couleurs : noms (`red`, `light-blue`, `orange`…), `#rrggbb` ou index ANSI (`20
 | | `F6` / `F7` | EXPLAIN / EXPLAIN ANALYZE |
 | | `Ctrl+j` · `Esc` (classique) / `i` · `Ctrl+k` | Aller aux résultats / revenir à l'éditeur |
 | | `[` / `]` | Résultat précédent / suivant |
+| | `Ctrl+t` / `Alt+w` | Nouveau script / fermer le script courant |
+| | `Alt+←` / `Alt+→` · `Ctrl+PgUp` / `Ctrl+PgDn` | Script précédent / suivant |
 | | `Ctrl+c` | Annuler la requête en cours |
 | | `Alt+1/2/3` · `Ctrl+h` · `Ctrl+p` | Changer d'onglet, aller à l'arbre, ligne de commande (depuis l'éditeur) |
 | Édition | `e` · `i` | Modifier la cellule (`Entrée` valider, `Tab` suivante, `Esc` annuler, `Ctrl+n` NULL, `Ctrl+d` DEFAULT, `Alt+Entrée` multi-ligne) |
@@ -284,9 +288,11 @@ Couleurs : noms (`red`, `light-blue`, `orange`…), `#rrggbb` ou index ANSI (`20
 | | `Ctrl+s` | Appliquer en une transaction (confirmation ; nom de la connexion en production) |
 | | `Ctrl+z` · `X` | Abandonner tous les changements (confirmation) |
 
+**Coller** (`Ctrl+Shift+v` ou le collage du terminal) fonctionne dans tous les champs de saisie : éditeur SQL, filtres (`f` : la valeur de la ligne courante, `F`), recherche, ligne de commande, confirmation de production, export, connexion. Dans les champs d'une ligne, les espaces et retours à la ligne autour du texte collé sont retirés (une cellule copiée avec `y` se colle telle quelle).
+
 **Presse-papier** — `auto` utilise le presse-papier système (X11, Wayland, macOS, Windows) et bascule sur la séquence OSC 52 (copie via le terminal) en SSH ou si le presse-papier système est indisponible. Sous tmux, OSC 52 demande `set -g set-clipboard on`.
 
-Commandes : `:q` (`:q!` sans confirmation), `:help`, `:reload`, `:connect <nom>`, `:connections`, `:reconnect`, `:disconnect`, `:save [nom]`, `:open [nom]`, `:history`, `:schema`, `:data`, `:sql`.
+Commandes : `:q` (`:q!` sans confirmation), `:help`, `:reload`, `:connect <nom>`, `:connections`, `:reconnect`, `:disconnect`, `:save [nom]`, `:open [nom]`, `:new`, `:close`, `:clear`, `:history`, `:schema`, `:data`, `:sql`.
 
 Les terminaux compatibles avec le protocole clavier kitty (kitty, WezTerm, Ghostty, foot, Alacritty récent) distinguent `Ctrl+Enter` d'`Enter` ; pgtui l'active automatiquement. Ailleurs (tmux, gnome-terminal), des touches de repli seront toujours proposées.
 
