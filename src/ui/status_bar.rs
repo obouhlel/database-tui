@@ -144,6 +144,7 @@ pub fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
             ("Esc".into(), "annuler"),
             ("Ctrl+n".into(), "NULL"),
             ("Ctrl+d".into(), "DEFAULT"),
+            ("Ctrl+g".into(), "UUID"),
         ]
     } else if let Some(crate::app::Overlay::CellEditor(_)) = &app.overlay {
         vec![
@@ -152,6 +153,7 @@ pub fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
             ("Esc".into(), "annuler"),
             ("Ctrl+n".into(), "NULL"),
             ("Ctrl+d".into(), "DEFAULT"),
+            ("Ctrl+g".into(), "UUID"),
             ("Alt+Enter".into(), "multi-ligne"),
         ]
     } else if app.tree.filter_editing {
@@ -249,6 +251,9 @@ pub fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
                     (hint(Context::SqlResults, Action::FocusEditor), "éditeur"),
                     (hint(Context::Data, Action::EditCell), "modifier"),
                     (hint(Context::Data, Action::InsertRow), "nouvelle ligne"),
+                    (hint(Context::Data, Action::DuplicateRow), "dupliquer"),
+                    (hint(Context::Data, Action::Copy), "copier"),
+                    (hint(Context::Data, Action::PeekReference), "réf. FK"),
                     (hint(Context::Data, Action::DeleteRow), "supprimer"),
                     (hint(Context::Data, Action::Undo), "annuler"),
                     (hint(Context::Data, Action::ShowChanges), "changements"),
@@ -267,6 +272,7 @@ pub fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
                     "résultats",
                 ),
                 (hint(Context::Data, Action::Detail), "détail"),
+                (hint(Context::Data, Action::PeekReference), "réf. FK"),
                 (hint(Context::Data, Action::Search), "chercher"),
                 (hint(Context::Data, Action::Copy), "copier"),
                 (hint(Context::Data, Action::CopyAs), "copier comme…"),
@@ -279,6 +285,9 @@ pub fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
                 vec![
                     (hint(Context::Data, Action::EditCell), "modifier"),
                     (hint(Context::Data, Action::InsertRow), "nouvelle ligne"),
+                    (hint(Context::Data, Action::DuplicateRow), "dupliquer"),
+                    (hint(Context::Data, Action::Copy), "copier"),
+                    (hint(Context::Data, Action::PeekReference), "réf. FK"),
                     (hint(Context::Data, Action::DeleteRow), "supprimer"),
                     (hint(Context::Data, Action::Undo), "annuler"),
                     (hint(Context::Data, Action::Redo), "rétablir"),
@@ -294,6 +303,7 @@ pub fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
                 (hint(Context::Data, Action::EditCell), "modifier"),
                 (hint(Context::Data, Action::InsertRow), "nouvelle ligne"),
                 (hint(Context::Data, Action::Detail), "détail"),
+                (hint(Context::Data, Action::PeekReference), "réf. FK"),
                 (hint(Context::Data, Action::Search), "chercher"),
                 (hint(Context::Data, Action::FilterEditor), "filtrer"),
                 (hint(Context::Data, Action::FreeWhere), "WHERE"),

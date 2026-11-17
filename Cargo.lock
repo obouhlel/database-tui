@@ -1644,6 +1644,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "unicode-width",
+ "uuid",
  "webpki-roots",
 ]
 

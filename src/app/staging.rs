@@ -178,6 +178,19 @@ impl Staging {
         0
     }
 
+    /// Adds rows with the given values on top (one undo step), in order:
+    /// `rows[0]` ends up first. Returns how many were added.
+    pub fn insert_rows(&mut self, rows: Vec<Vec<NewValue>>) -> usize {
+        let rows: Vec<_> = rows.into_iter().filter(|r| r.len() == self.ncols).collect();
+        if rows.is_empty() {
+            return 0;
+        }
+        self.snapshot();
+        let n = rows.len();
+        self.state.inserts.splice(0..0, rows);
+        n
+    }
+
     pub fn remove_insert(&mut self, index: usize) {
         if index < self.state.inserts.len() {
             self.snapshot();

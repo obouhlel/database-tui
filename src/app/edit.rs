@@ -20,6 +20,14 @@ use crate::db::changes::{ApplyError, ChangeCounts, NewValue};
 use crate::db::worker::{DbCommand, DbEvent};
 use crate::keymap::Action;
 
+fn is_uuid(data_type: &str) -> bool {
+    data_type.trim().eq_ignore_ascii_case("uuid")
+}
+
+fn new_uuid() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
 /// Values longer than this open the multi-line editor.
 const LONG_VALUE: usize = 80;
 
@@ -196,6 +204,11 @@ impl App {
                     self.open_editor(0, first);
                 }
             }
+            DuplicateRow => {
+                if self.editable() {
+                    self.duplicate_rows();
+                }
+            }
             DeleteRow => {
                 if self.editable() {
                     self.delete_rows();
@@ -237,6 +250,69 @@ impl App {
     fn after_staging_change(&mut self) {
         let rows = self.data.row_count();
         self.data.grid.scroll_into_view(rows);
+    }
+
+    /// `p`: copies the current row (or the selected rows) into new rows.
+    /// Columns only the server may fill, and key columns with a default,
+    /// are left to the server; a `uuid` key without default gets a fresh
+    /// UUID. A key that is still a copy is opened in the editor.
+    fn duplicate_rows(&mut self) {
+        let (range, _) = self.data.selection(true);
+        self.data.visual = None;
+        let d = &self.data;
+        let mut rows = Vec::new();
+        for r in range {
+            let values: Vec<NewValue> = if r < d.ins() {
+                d.staging.state.inserts[r].clone()
+            } else if let Some(row) = d.row_at(r) {
+                let staged = d
+                    .staging
+                    .key_of(row)
+                    .and_then(|k| d.staging.state.updates.get(&k));
+                (0..d.columns.len())
+                    .map(|c| match staged.and_then(|e| e.cells.get(&c)) {
+                        Some(v) => v.clone(),
+                        None => NewValue::from_text(row.get(c).and_then(|v| v.as_deref())),
+                    })
+                    .collect()
+            } else {
+                continue;
+            };
+            let values = values
+                .into_iter()
+                .zip(&d.columns)
+                .map(|(v, c)| {
+                    if c.server_only || (c.key && c.has_default) {
+                        NewValue::Default
+                    } else if c.key && is_uuid(&c.data_type) {
+                        NewValue::Text(new_uuid())
+                    } else {
+                        v
+                    }
+                })
+                .collect();
+            rows.push(values);
+        }
+        let n = self.data.staging.insert_rows(rows);
+        if n == 0 {
+            self.notify(Level::Warning, "Ligne non chargée");
+            return;
+        }
+        self.data.grid.top();
+        // A key column still holding the copied value must be changed.
+        let d = &self.data;
+        let copied_key = d.order.iter().position(|&c| {
+            let col = &d.columns[c];
+            col.key && !col.has_default && !col.server_only && !is_uuid(&col.data_type)
+        });
+        match copied_key {
+            Some(dcol) if n == 1 => {
+                self.data.grid.col = dcol;
+                self.notify(Level::Info, "Ligne dupliquée — modifiez la clé");
+                self.open_editor(0, dcol);
+            }
+            _ => self.notify(Level::Info, format!("{n} ligne(s) dupliquée(s)")),
+        }
     }
 
     /// `dd`: marks the current row (or the selected rows) for deletion, or
@@ -362,6 +438,18 @@ impl App {
             KeyCode::Char('n') if ctrl => Some(NewValue::Null),
             KeyCode::Char('d') if ctrl => Some(NewValue::Default),
             KeyCode::Char('s') if ctrl => Some(NewValue::Text(ed.input.text())),
+            KeyCode::Char('g') if ctrl => {
+                // A fresh UUID: replaces a uuid value, else inserted.
+                let id = new_uuid();
+                match &mut ed.input {
+                    EditorInput::Line(l) if is_uuid(&ed.data_type) => *l = LineInput::with_text(id),
+                    EditorInput::Line(l) => l.insert_str(&id),
+                    EditorInput::Multi(t) if is_uuid(&ed.data_type) => *t = TextArea::new(&id),
+                    EditorInput::Multi(t) => t.insert_str(&id),
+                }
+                ed.error = None;
+                None
+            }
             KeyCode::Enter if alt && !multi => {
                 // Switch to the multi-line editor.
                 let text = ed.input.text();

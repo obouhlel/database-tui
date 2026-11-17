@@ -95,6 +95,7 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, body: Rect) {
         Some(Overlay::RowDetail { scroll }) => {
             data_popups::draw_row_detail(frame, app, *scroll, body)
         }
+        Some(Overlay::Reference(p)) => data_popups::draw_reference(frame, app, p, body),
         Some(Overlay::Login(form)) => popup::draw_login(frame, app, form, body),
         Some(Overlay::SaveServer(conn)) => popup::draw_save_server(frame, app, conn, body),
         Some(Overlay::ConfirmDelete(name)) => popup::draw_confirm_delete(frame, app, name, body),

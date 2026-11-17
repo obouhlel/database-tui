@@ -79,9 +79,9 @@ Sous chaque connexion, l'arbre affiche **toutes les bases** du serveur, avec leu
 
 Rien n'est écrit en base tant que vous n'avez pas validé : chaque modification est d'abord **mise en attente** (staging), pour la table ouverte.
 
-- `e` (ou `i`) modifie la cellule : éditeur sur place, ou fenêtre multi-ligne pour les textes longs et le JSON (indenté à l'ouverture). `Entrée` valide, `Tab` / `Shift+Tab` valide et passe à la colonne suivante / précédente, `Esc` annule, `Ctrl+n` met `NULL`, `Ctrl+d` met `DEFAULT`, `Alt+Entrée` passe en multi-ligne (où `Ctrl+s` valide).
+- `e` (ou `i`) modifie la cellule : éditeur sur place, ou fenêtre multi-ligne pour les textes longs et le JSON (indenté à l'ouverture). `Entrée` valide, `Tab` / `Shift+Tab` valide et passe à la colonne suivante / précédente, `Esc` annule, `Ctrl+n` met `NULL`, `Ctrl+d` met `DEFAULT`, `Ctrl+g` génère un UUID (remplace la valeur d'une colonne `uuid`, sinon l'insère au curseur), `Alt+Entrée` passe en multi-ligne (où `Ctrl+s` valide).
 - La valeur est vérifiée selon le type avant d'être mise en attente (entiers et leurs bornes, décimaux, réels, booléens, UUID, dates, heures, horodatages, JSON, tableaux) ; l'erreur s'affiche sous la cellule. Le serveur reste juge : chaque valeur lui est envoyée en paramètre et convertie par `CAST`.
-- `o` ajoute une ligne (en haut de la grille, toutes colonnes à `DEFAULT`, curseur sur la première colonne sans valeur par défaut), `dd` marque la ligne (ou la sélection `V`) pour suppression ou la démarque, et retire une ligne ajoutée. `u` annule le dernier changement, `Ctrl+r` le rétablit.
+- `o` ajoute une ligne (en haut de la grille, toutes colonnes à `DEFAULT`, curseur sur la première colonne sans valeur par défaut), `p` duplique la ligne (ou la sélection `V`) en nouvelle(s) ligne(s) : les colonnes générées et les clés avec valeur par défaut sont laissées au serveur, une clé `uuid` sans défaut reçoit un nouvel UUID, et une autre clé recopiée s'ouvre dans l'éditeur pour être changée. `dd` marque la ligne (ou la sélection `V`) pour suppression ou la démarque, et retire une ligne ajoutée. `u` annule le dernier changement, `Ctrl+r` le rétablit.
 - Dans la grille, les cellules modifiées, les lignes ajoutées et les lignes supprimées ont chacune leur couleur ; sous le curseur, l'en-tête affiche l'ancienne valeur (« avant : … »). La barre de statut compte les changements en attente.
 - `D` ouvre la vue des changements : tableau **avant → après** groupé par type (UPDATE, INSERT, DELETE), et onglet **SQL généré** (`Tab`) avec les instructions exactes, valeurs en littéraux pour la lecture. `e` permet d'y modifier le SQL avant de l'exécuter (sans détection de conflit dans ce cas).
 - `Ctrl+s` applique tout dans **une seule transaction**, après confirmation affichant le nombre de lignes par type. Sur une connexion de production, il faut taper le nom de la connexion. En cas d'erreur, `ROLLBACK` complet, message du serveur indiquant le changement fautif, et les changements restent en attente pour correction.
@@ -278,12 +278,13 @@ Couleurs : noms (`red`, `light-blue`, `orange`…), `#rrggbb` ou index ANSI (`20
 | | `gg` / `G`, `Ctrl+d`/`Ctrl+u`, `PgUp`/`PgDn` | Début / fin / demi-page / page (chargement paresseux) |
 | | `0`/`^` / `$`, `w` / `b` | Première / dernière colonne, colonne suivante / précédente |
 | | `Enter` | Vue détail de la ligne (JSON indenté, bytea, textes longs ; `[`/`]` ligne préc./suiv., `y` copie en JSON) |
+| | `K` · `gd` | Sur une clé étrangère : fenêtre avec la ligne référencée (`y` la copie en JSON) ; marche aussi sur un résultat SQL issu d'une table |
 | | `/`, `n` / `N` | Rechercher dans les valeurs chargées (insensible à la casse sauf majuscule), occurrence suivante / précédente |
-| | `f` | Filtre par colonne (`=`, `!=`, `<`, `<=`, `>`, `>=`, `LIKE`, `ILIKE`, `~`, `~*`, `IS NULL`, `IS NOT NULL`, AND / OR) |
+| | `f` | Filtre par colonne (`=`, `!=`, `<`, `<=`, `>`, `>=`, `LIKE`, `ILIKE`, `~`, `~*`, `IS NULL`, `IS NOT NULL`, AND / OR) ; s'ouvre sur le choix de la colonne (pré-sélectionnée), `Tab` passe à l'opérateur puis à la valeur |
 | | `F` / `C` | Filtre SQL libre (`WHERE …`) / effacer tous les filtres |
 | | `s` / `S` | Trier sur la colonne (asc → desc → aucun, multi-colonnes) / effacer le tri |
 | | `v` / `V` | Sélection de cellules / de lignes (`Esc` pour sortir) |
-| | `y`, `yy`, `Y` | Copier la cellule (ou la sélection), la ligne, ou la sélection au choix TSV / CSV / JSON / INSERT |
+| | `y`, `yy`, `Y` | Copier la cellule (ou la sélection, immédiatement), la ligne, ou la sélection au choix TSV / CSV / JSON / INSERT |
 | | `<` / `>` / `=`, `-` / `+` | Rétrécir / élargir / largeur auto, masquer la colonne / tout réafficher |
 | | `R`, `Ctrl+c` | Relancer la requête, annuler une requête en cours |
 | | `E` | Exporter (CSV, TSV, JSON, INSERT) |
@@ -296,8 +297,9 @@ Couleurs : noms (`red`, `light-blue`, `orange`…), `#rrggbb` ou index ANSI (`20
 | | `[` / `]` | Résultat précédent / suivant |
 | | `Ctrl+c` | Annuler la requête en cours |
 | | `Alt+1/2/3` · `Ctrl+h` · `Ctrl+p` | Changer d'onglet, aller à l'arbre, ligne de commande (depuis l'éditeur) |
-| Édition | `e` · `i` | Modifier la cellule (`Entrée` valider, `Tab` suivante, `Esc` annuler, `Ctrl+n` NULL, `Ctrl+d` DEFAULT, `Alt+Entrée` multi-ligne) |
+| Édition | `e` · `i` | Modifier la cellule (`Entrée` valider, `Tab` suivante, `Esc` annuler, `Ctrl+n` NULL, `Ctrl+d` DEFAULT, `Ctrl+g` UUID, `Alt+Entrée` multi-ligne) |
 | | `o` | Nouvelle ligne |
+| | `p` | Dupliquer la ligne (ou la sélection) |
 | | `dd` | Marquer / démarquer la ligne (ou la sélection) pour suppression |
 | | `u` / `Ctrl+r` | Annuler / rétablir le dernier changement |
 | | `D` | Changements en attente : avant → après, SQL généré (`Tab`), SQL modifiable (`e`) |

@@ -144,6 +144,7 @@ actions! {
     NextColumn => "next_column", "Colonne suivante";
     PrevColumn => "prev_column", "Colonne précédente";
     Detail => "detail", "Vue détail de la ligne";
+    PeekReference => "peek_reference", "Ligne référencée par la clé étrangère";
     Visual => "visual", "Sélection de cellules";
     VisualLine => "visual_line", "Sélection de lignes";
     CopyRow => "copy_row", "Copier la ligne (TSV)";
@@ -167,6 +168,7 @@ actions! {
     DeleteConnection => "delete_connection", "Supprimer la connexion de la liste";
     EditCell => "edit_cell", "Modifier la cellule";
     InsertRow => "insert_row", "Nouvelle ligne";
+    DuplicateRow => "duplicate_row", "Dupliquer la ligne (ou les lignes sélectionnées)";
     DeleteRow => "delete_row", "Marquer / démarquer la ligne pour suppression";
     Undo => "undo", "Annuler le dernier changement";
     Redo => "redo", "Rétablir le changement";
@@ -184,6 +186,15 @@ actions! {
     FocusEditor => "focus_editor", "Revenir à l'éditeur";
     NextResult => "next_result", "Résultat suivant";
     PrevResult => "prev_result", "Résultat précédent";
+}
+
+impl Action {
+    /// Harmless actions that fire as soon as their key is typed, even when
+    /// it also starts a longer sequence (`y` copies the cell at once, `yy`
+    /// then copies the row).
+    fn is_eager(self) -> bool {
+        matches!(self, Action::Copy)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -250,6 +261,7 @@ fn defaults() -> Vec<(Context, Action, &'static [&'static str])> {
         (Data, FirstColumn, &["0", "^"]),
         (Data, LastColumn, &["$"]),
         (Data, Detail, &["enter"]),
+        (Data, PeekReference, &["K", "gd"]),
         (Data, Visual, &["v"]),
         (Data, VisualLine, &["V"]),
         (Data, Copy, &["y"]),
@@ -272,6 +284,7 @@ fn defaults() -> Vec<(Context, Action, &'static [&'static str])> {
         (Data, Export, &["E"]),
         (Data, EditCell, &["e", "i"]),
         (Data, InsertRow, &["o"]),
+        (Data, DuplicateRow, &["p"]),
         (Data, DeleteRow, &["dd"]),
         (Data, Undo, &["u"]),
         (Data, Redo, &["ctrl+r"]),
@@ -432,6 +445,9 @@ pub enum Resolved {
     Action(Action),
     /// Waiting for the next key of a sequence.
     Pending,
+    /// An eager action to run now, while waiting for the rest of a longer
+    /// sequence.
+    PendingWith(Action),
     Unbound,
 }
 
@@ -460,8 +476,12 @@ impl KeyResolver {
         let look = km.lookup(contexts, &seq);
         if look.is_prefix {
             self.pending = seq;
-            self.pending_exact = look.exact;
             self.since = Some(now);
+            if let Some(a) = look.exact.filter(|a| a.is_eager()) {
+                self.pending_exact = None;
+                return Resolved::PendingWith(a);
+            }
+            self.pending_exact = look.exact;
             return Resolved::Pending;
         }
         if let Some(a) = look.exact {
@@ -578,6 +598,27 @@ mod tests {
         assert_eq!(r.check_timeout(t0 + Duration::from_millis(100)), None);
         assert_eq!(r.check_timeout(t0 + SEQUENCE_TIMEOUT), Some(Action::Open));
         assert!(!r.is_pending());
+    }
+
+    #[test]
+    fn eager_copy_fires_at_once() {
+        let km = Keymap::default();
+        let data = &[Context::Data, Context::Center, Context::Global];
+        let mut r = KeyResolver::default();
+        let t0 = Instant::now();
+        assert_eq!(
+            r.feed_at(&km, data, chord("y"), t0),
+            Resolved::PendingWith(Action::Copy)
+        );
+        assert_eq!(r.check_timeout(t0 + SEQUENCE_TIMEOUT), None);
+        assert_eq!(
+            r.feed_at(&km, data, chord("y"), t0),
+            Resolved::PendingWith(Action::Copy)
+        );
+        assert_eq!(
+            r.feed_at(&km, data, chord("y"), t0),
+            Resolved::Action(Action::CopyRow)
+        );
     }
 
     #[test]

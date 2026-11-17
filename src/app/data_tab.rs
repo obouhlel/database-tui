@@ -12,7 +12,7 @@ use crate::db::worker::{DbCommand, DbEvent};
 use crate::keymap::Action;
 
 impl App {
-    fn next_request_id(&mut self) -> u64 {
+    pub(super) fn next_request_id(&mut self) -> u64 {
         self.request_seq += 1;
         self.request_seq
     }
@@ -138,6 +138,7 @@ impl App {
             action,
             EditCell
                 | InsertRow
+                | DuplicateRow
                 | DeleteRow
                 | Undo
                 | Redo
@@ -180,6 +181,7 @@ impl App {
             CellRight | NextColumn => self.data.move_col(1),
             FirstColumn => self.data.grid.col = 0,
             LastColumn => self.data.move_col(isize::MAX / 2),
+            PeekReference => return self.peek_reference(),
             Detail => {
                 if self.data.row_at(self.data.grid.row).is_some() {
                     self.overlay = Some(Overlay::RowDetail { scroll: 0 });

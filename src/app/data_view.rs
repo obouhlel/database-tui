@@ -36,6 +36,9 @@ pub struct DataColumn {
     pub key: bool,
     /// Filled by the server when left out (default, identity, generated).
     pub has_default: bool,
+    /// Only the server may fill it (`GENERATED ALWAYS`, identity or
+    /// generated column): never copied into a new row.
+    pub server_only: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -134,6 +137,8 @@ impl DataView {
                 kind: ValueKind::of(&c.data_type),
                 key: false,
                 has_default: c.default.is_some() || c.identity.is_some() || c.generated.is_some(),
+                server_only: c.generated.is_some()
+                    || c.identity == Some(crate::db::schema::Identity::Always),
             })
             .collect();
 
@@ -228,6 +233,7 @@ impl DataView {
                     kind: ValueKind::of_engine(&c.data_type),
                     key: false,
                     has_default: false,
+                    server_only: false,
                 })
                 .collect(),
             read_only_reason: Some("résultat de requête : lecture seule".into()),

@@ -105,7 +105,7 @@ pub fn draw_multi_editor(frame: &mut Frame, app: &App, ed: &CellEditor, area: Re
     let block = popup(
         t,
         format!(" {} ({}) ", ed.column, ed.data_type),
-        " Ctrl+s / Alt+Enter valider · Esc annuler · Ctrl+n NULL · Ctrl+d DEFAULT ",
+        " Ctrl+s / Alt+Enter valider · Esc annuler · Ctrl+n NULL · Ctrl+d DEFAULT · Ctrl+g UUID ",
         t.accent,
     );
     let inner = block.inner(rect);

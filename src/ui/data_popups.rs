@@ -226,6 +226,97 @@ pub fn draw_row_detail(frame: &mut Frame, app: &App, scroll: u16, area: Rect) {
     frame.render_widget(Paragraph::new(lines).scroll((scroll.min(max), 0)), inner);
 }
 
+/// `K`: the row a foreign key points to.
+pub fn draw_reference(
+    frame: &mut Frame,
+    app: &App,
+    p: &crate::app::reference::ReferencePeek,
+    area: Rect,
+) {
+    let t = &app.theme;
+    let rect = centered(
+        area,
+        area.width.saturating_sub(8).clamp(40, 110),
+        area.height.saturating_sub(2),
+    );
+    let title = match &p.result {
+        Some(Ok(r)) => format!(" {} → {}.{} ", p.column, r.object.schema, r.object.name),
+        _ => format!(" {} = {} ", p.column, p.value),
+    };
+    let block = popup(app, title, " j/k défiler · y copier en JSON · Esc ");
+    let inner = block.inner(rect);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(block, rect);
+    let r = match &p.result {
+        None => {
+            frame.render_widget(
+                Line::styled("Chargement de la ligne référencée…", t.dim()),
+                inner,
+            );
+            return;
+        }
+        Some(Err(e)) => {
+            frame.render_widget(
+                Paragraph::new(e.clone())
+                    .style(Style::new().fg(t.error))
+                    .wrap(ratatui::widgets::Wrap { trim: false }),
+                inner,
+            );
+            return;
+        }
+        Some(Ok(r)) => r,
+    };
+    let mut lines = vec![
+        Line::styled(
+            format!("{} = {}  ({})", p.column, p.value, r.constraint),
+            t.dim(),
+        ),
+        Line::default(),
+    ];
+    let Some(row) = &r.row else {
+        lines.push(Line::styled(
+            "Aucune ligne ne correspond à cette valeur",
+            Style::new().fg(t.error),
+        ));
+        frame.render_widget(Paragraph::new(lines), inner);
+        return;
+    };
+    let width = inner.width.saturating_sub(2).max(10) as usize;
+    for ((name, ty), v) in r.columns.iter().zip(row) {
+        lines.push(Line::from(vec![
+            Span::styled(
+                name.clone(),
+                Style::new().fg(t.accent).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("  {ty}"), t.dim()),
+        ]));
+        match v {
+            None => lines.push(Line::styled(
+                "  NULL",
+                t.cell(crate::app::grid::CellStyle::Null),
+            )),
+            Some(v) if v.is_empty() => lines.push(Line::styled("  (chaîne vide)", t.dim())),
+            Some(v) => {
+                let kind = crate::app::value::ValueKind::of(ty);
+                for l in pretty(kind, v).lines() {
+                    let chars: Vec<char> = l.chars().collect();
+                    if chars.is_empty() {
+                        lines.push(Line::raw(""));
+                    }
+                    for chunk in chars.chunks(width) {
+                        lines.push(Line::styled(
+                            format!("  {}", chunk.iter().collect::<String>()),
+                            Style::new().fg(t.fg),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    let max = (lines.len() as u16).saturating_sub(inner.height);
+    frame.render_widget(Paragraph::new(lines).scroll((p.scroll.min(max), 0)), inner);
+}
+
 pub fn draw_export(
     frame: &mut Frame,
     app: &App,
