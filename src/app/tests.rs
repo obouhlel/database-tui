@@ -1601,3 +1601,56 @@ mod sql {
         assert_eq!(app.status.as_ref().map(|s| s.level), Some(Level::Warning));
     }
 }
+
+#[test]
+fn virtual_relations_merge_into_details_and_flag_missing_databases() {
+    let mut app = connected_app();
+    app.relations = crate::config::relations::Relations::parse(
+        r#"
+[[relation]]
+from = { database = "demo", table = "orders", columns = ["customer_id"] }
+to = { database = "demo", table = "customers", columns = ["id"] }
+kind = "souple"
+
+[[relation]]
+from = { database = "demo", table = "orders", columns = ["user_id"] }
+to = { database = "auth", table = "users", columns = ["id"] }
+kind = "cross_base"
+"#,
+    )
+    .unwrap();
+    key(&mut app, "2");
+    let effects = key_effects(&mut app, "G enter");
+    let obj = match db(effects).as_slice() {
+        [DbCommand::LoadDetails(o)] => o.clone(),
+        other => panic!("expected details request, got {other:?}"),
+    };
+    assert_eq!(obj.name, "orders");
+    app.update(Msg::Db(DbEvent::DetailsLoaded {
+        details: Box::new(crate::db::schema::ObjectDetails {
+            object: obj.clone(),
+            owner: None,
+            comment: None,
+            columns: vec![],
+            indexes: vec![],
+            constraints: vec![],
+            triggers: vec![],
+            foreign_keys: vec![],
+            referenced_by: vec![],
+            stats: None,
+            properties: vec![],
+            ddl: String::new(),
+        }),
+        elapsed: Duration::ZERO,
+    }));
+    let Some(DetailsState::Loaded(d)) = app.server("local").unwrap().details.get(&obj) else {
+        panic!("details not cached");
+    };
+    let fks = d.foreign_keys.clone();
+    assert_eq!(fks.len(), 2);
+    assert!(fks.iter().all(|fk| fk.is_virtual()));
+    assert_eq!(fks[1].to.database, "auth");
+    // `demo` is on the server, `auth` is not: following the second one warns.
+    assert!(app.has_database(&fks[0].to));
+    assert!(!app.has_database(&fks[1].to));
+}

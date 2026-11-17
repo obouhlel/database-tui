@@ -340,6 +340,8 @@ pub struct App {
     pub data_dir: Option<PathBuf>,
     /// Default directory of exports (the working directory).
     pub export_dir: Option<PathBuf>,
+    /// Virtual foreign keys (`relations.toml`), merged into loaded details.
+    pub relations: crate::config::relations::Relations,
     /// Id of the export in flight.
     exporting: Option<u64>,
     /// Config / keymap warnings shown in the picker.
@@ -449,6 +451,7 @@ impl App {
             config_path: None,
             data_dir: None,
             export_dir: None,
+            relations: Default::default(),
             exporting: None,
         }
     }
@@ -977,6 +980,14 @@ impl App {
             FollowLink => {
                 let target = self.schema.table().and_then(|t| t.selected_link()).cloned();
                 match target {
+                    // A virtual relation can point to a database this server lacks.
+                    Some(t) if !self.has_database(&t) => self.notify(
+                        Level::Warning,
+                        format!(
+                            "Base « {} » absente de la connexion {}",
+                            t.database, t.connection
+                        ),
+                    ),
                     Some(t) => {
                         if !self.guard(edit::After::Follow(t.clone())) {
                             if let Some(cur) = self.current.take() {
@@ -1080,6 +1091,12 @@ impl App {
     }
 
     /// Opens `obj` in the center panel and reveals it in the tree.
+    /// The object's database is listed on its connection.
+    fn has_database(&self, obj: &ObjectRef) -> bool {
+        self.server(&obj.connection)
+            .is_some_and(|s| s.database(&obj.database).is_some())
+    }
+
     fn go_to(&mut self, obj: ObjectRef) {
         if !self.tree.filter.is_empty() {
             self.tree.filter.clear();

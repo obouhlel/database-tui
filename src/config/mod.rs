@@ -7,6 +7,7 @@
 mod example;
 pub mod password;
 pub mod pgpass;
+pub mod relations;
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};

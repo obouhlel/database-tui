@@ -6,7 +6,7 @@ use std::sync::Arc;
 use super::format;
 use super::grid::{Cell, CellStyle, GridData, GridState};
 use crate::db::catalog::{ObjectKind, ObjectRef};
-use crate::db::schema::{ConstraintKind, Generated, Identity, ObjectDetails};
+use crate::db::schema::{ConstraintKind, FkOrigin, Generated, Identity, ObjectDetails};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
@@ -403,15 +403,38 @@ fn relations_table(d: &ObjectDetails) -> SectionTable {
             } else {
                 ("entrante", &fk.from, &fk.from_columns, &fk.to_columns)
             };
+            let target = if other.database == d.object.database {
+                other.qualified()
+            } else {
+                format!("{}:{}", other.database, other.qualified())
+            };
+            // A virtual relation has no referential actions: its condition
+            // and note take their place.
+            let (dir, on_update, on_delete) = match &fk.origin {
+                FkOrigin::Declared => (
+                    Cell::styled(dir, CellStyle::Accent),
+                    Cell::new(fk.on_update.label()),
+                    Cell::new(fk.on_delete.label()),
+                ),
+                FkOrigin::Virtual { when, note, .. } => (
+                    Cell::styled(format!("{dir} ~"), CellStyle::Dim),
+                    Cell::new(
+                        when.as_deref()
+                            .map(|w| format!("si {w}"))
+                            .unwrap_or_default(),
+                    ),
+                    Cell::new(note.clone().unwrap_or_default()),
+                ),
+            };
             (
                 vec![
-                    Cell::styled(dir, CellStyle::Accent),
-                    Cell::styled(other.qualified(), CellStyle::Link),
+                    dir,
+                    Cell::styled(target, CellStyle::Link),
                     Cell::new(own_cols.join(", ")),
                     Cell::new(other_cols.join(", ")),
                     Cell::new(fk.name.clone()),
-                    Cell::new(fk.on_update.label()),
-                    Cell::new(fk.on_delete.label()),
+                    on_update,
+                    on_delete,
                 ],
                 Some(other.clone()),
             )
@@ -424,8 +447,8 @@ fn relations_table(d: &ObjectDetails) -> SectionTable {
             "Colonnes",
             "Colonnes liées",
             "Contrainte",
-            "ON UPDATE",
-            "ON DELETE",
+            "ON UPDATE / si",
+            "ON DELETE / note",
         ],
         rows,
     )
@@ -497,7 +520,7 @@ fn info_table(d: &ObjectDetails) -> SectionTable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::schema::{Column, FkAction, ForeignKey, Stats};
+    use crate::db::schema::{Column, FkAction, FkOrigin, ForeignKey, Stats};
 
     fn obj(name: &str) -> ObjectRef {
         ObjectRef {
@@ -519,6 +542,7 @@ mod tests {
             to_columns: vec!["id".into()],
             on_update: FkAction::NoAction,
             on_delete: FkAction::Cascade,
+            origin: FkOrigin::Declared,
         };
         let incoming = ForeignKey {
             name: "items_order_fkey".into(),
@@ -528,6 +552,7 @@ mod tests {
             to_columns: vec!["id".into()],
             on_update: FkAction::NoAction,
             on_delete: FkAction::Cascade,
+            origin: FkOrigin::Declared,
         };
         let col = |name: &str, pk: bool, refs: Option<&str>| Column {
             name: name.into(),

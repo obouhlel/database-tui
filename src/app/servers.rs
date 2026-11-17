@@ -478,10 +478,12 @@ impl App {
                     label: "détails".into(),
                     elapsed,
                 });
+                let mut details = *details;
+                self.relations.apply(&mut details);
                 if let Some(s) = self.server_mut(&details.object.connection) {
                     s.details.insert(
                         details.object.clone(),
-                        DetailsState::Loaded(Arc::new(*details)),
+                        DetailsState::Loaded(Arc::new(details)),
                     );
                 }
             }

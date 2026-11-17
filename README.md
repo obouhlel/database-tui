@@ -202,6 +202,26 @@ tunnel_cmd = "ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes -L {port}:db.i
 
 ![Connexion par tunnel](docs/screenshots/17-tunnel.png)
 
+### Relations virtuelles
+
+Fichier optionnel : `~/.config/pgtui/relations.toml`, à côté de `config.toml`. Il déclare les références que la base ne contraint pas : une colonne qui pointe vers une table **d'une autre base**, un id gardé sans FK exprès, un couple polymorphe `(type, id)`. Elles s'ajoutent aux FK déclarées dans la section **Relations** de l'onglet Schema, marquées `~` (et dans la colonne « Clé » de la section Colonnes : `FK ~public.users(id)`), et `Entrée` les suit comme une vraie FK, y compris vers une autre base du même serveur.
+
+```toml
+[[relation]]
+from = { database = "api_core", table = "public.factures", columns = ["client_id"] }
+to   = { database = "api_core", table = "public.entreprises", columns = ["id"] }
+kind = "polymorphe"                    # libre : souple, cross_base, polymorphe…
+when = "client_type = 'entreprise'"    # optionnel : condition sur la ligne source
+note = "client polymorphe"             # optionnel
+
+[[relation]]
+from = { database = "api_core", table = "factures", columns = ["verifiee_par"] }  # schéma public par défaut
+to   = { database = "auth", table = "users", columns = ["id"] }
+kind = "cross_base"
+```
+
+`database` vaut pour la base du même nom et pour une base suffixée (`api_core_dev`) : le suffixe passe à l'autre bout, donc sur un serveur qui porte `api_core_dev` et `auth_dev`, la relation `api_core` → `auth` relie ces deux-là. Un fichier invalide est signalé au démarrage et ignoré ; `pgtui --check-config` le valide. Le fichier peut être généré par un outil (une ligne par lien connu du code) plutôt qu'écrit à la main.
+
 ### Thème
 
 Par défaut (`theme = "terminal"`), pgtui n'utilise que les couleurs de votre terminal (texte et fond par défaut, 16 couleurs ANSI), comme nvim sans `termguicolors` : il reprend automatiquement le thème du terminal, clair ou sombre. `dark` et `light` sont des thèmes en couleurs exactes (truecolor).
@@ -298,7 +318,7 @@ src/
 ├── run.rs           boucle d'événements unique (clavier, événements DB, tick, signaux)
 ├── terminal.rs      raw mode / écran alternatif, restauration garantie (Drop + hook de panic)
 ├── clipboard.rs     presse-papier système + repli OSC 52
-├── config/          config.toml (serde), mots de passe, ~/.pgpass
+├── config/          config.toml (serde), mots de passe, ~/.pgpass, relations.toml
 ├── sql/             quoting des identifiants/littéraux, lexer SQL (coloration), découpage des scripts
 ├── storage.rs       historique et requêtes enregistrées (répertoire de données)
 ├── db/
