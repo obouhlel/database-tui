@@ -137,6 +137,8 @@ actions! {
     PrevSection => "prev_section", "Section précédente";
     FollowLink => "follow_link", "Aller à la table liée";
     JumpBack => "jump_back", "Revenir à l'objet précédent";
+    FollowReference => "follow_reference", "Aller à la ligne référencée par la cellule";
+    ShowReferences => "show_references", "Tables qui référencent la valeur de la cellule";
     Copy => "copy", "Copier (DDL ou ligne)";
     Refresh => "refresh", "Recharger";
     CellLeft => "cell_left", "Cellule à gauche";
@@ -261,7 +263,10 @@ fn defaults() -> Vec<(Context, Action, &'static [&'static str])> {
         (Data, FirstColumn, &["0", "^"]),
         (Data, LastColumn, &["$"]),
         (Data, Detail, &["enter"]),
-        (Data, PeekReference, &["K", "gd"]),
+        (Data, PeekReference, &["K"]),
+        (Data, FollowReference, &["gd"]),
+        (Data, ShowReferences, &["gr"]),
+        (Data, JumpBack, &["ctrl+o"]),
         (Data, Visual, &["v"]),
         (Data, VisualLine, &["V"]),
         (Data, Copy, &["y"]),

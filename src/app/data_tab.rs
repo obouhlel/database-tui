@@ -34,6 +34,9 @@ impl App {
                 return Vec::new();
             };
             self.data = DataView::new(d, self.config.general.page_size, server.conn.read_only);
+            if let Some(filter) = self.take_jump_filter(&obj) {
+                self.data.filter = filter;
+            }
             self.dirty = true;
         }
 
@@ -125,7 +128,14 @@ impl App {
         if self.results_mode
             && matches!(
                 action,
-                FilterEditor | FreeWhere | ClearFilters | Sort | ClearSort | Refresh
+                FilterEditor
+                    | FreeWhere
+                    | ClearFilters
+                    | Sort
+                    | ClearSort
+                    | Refresh
+                    | FollowReference
+                    | ShowReferences
             )
         {
             self.notify(
@@ -201,6 +211,9 @@ impl App {
             Copy => return self.copy_data(CopyFormat::Tsv, false, false),
             CopyRow => return self.copy_data(CopyFormat::Tsv, true, false),
             CopyAs => self.overlay = Some(Overlay::CopyFormat { cursor: 0 }),
+            FollowReference => self.follow_reference(),
+            ShowReferences => self.show_references(),
+            JumpBack => self.jump_back(),
             Export => self.open_export(),
             Search => {
                 self.overlay = Some(Overlay::DataSearch {

@@ -591,6 +591,49 @@ pub fn draw_query_list(frame: &mut Frame, app: &App, names: &[String], cursor: u
     frame.render_widget(Paragraph::new(lines).block(block), rect);
 }
 
+/// `gd` with several targets, `gr`: the tables to jump to.
+pub fn draw_jump_list(
+    frame: &mut Frame,
+    app: &App,
+    title: &str,
+    jumps: &[crate::app::follow::Jump],
+    cursor: usize,
+    area: Rect,
+) {
+    let t = &app.theme;
+    let width = jumps
+        .iter()
+        .map(|j| j.label.width() as u16 + 4)
+        .chain([title.width() as u16 + 4, 40])
+        .max()
+        .unwrap_or(40)
+        .min(area.width);
+    let rect = centered(area, width, (jumps.len() as u16 + 2).min(area.height));
+    let block = popup(
+        t,
+        title.to_string(),
+        " Entrée ouvrir · Esc fermer ",
+        t.accent,
+    );
+    frame.render_widget(Clear, rect);
+    let height = rect.height.saturating_sub(2) as usize;
+    let skip = (cursor + 1).saturating_sub(height);
+    let lines: Vec<Line> = jumps
+        .iter()
+        .enumerate()
+        .skip(skip)
+        .map(|(i, j)| {
+            let style = if i == cursor {
+                Style::new().bg(t.selection_bg).fg(t.selection_fg)
+            } else {
+                Style::new().fg(t.fg)
+            };
+            Line::styled(format!(" {}", j.label), style)
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines).block(block), rect);
+}
+
 /// Completion list under (or above) the cursor at (`x`, `y`).
 fn draw_completion(
     frame: &mut Frame,

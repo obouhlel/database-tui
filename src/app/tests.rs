@@ -1745,3 +1745,118 @@ kind = "cross_base"
     assert!(app.has_database(&fks[0].to));
     assert!(!app.has_database(&fks[1].to));
 }
+
+#[test]
+fn gd_follows_a_reference_filtered_and_ctrl_o_restores_the_previous_filter() {
+    use crate::db::data::{Op, TextRows};
+    use crate::db::schema::{Column, FkAction, FkOrigin, ForeignKey, ObjectDetails};
+
+    fn details(obj: &ObjectRef, cols: &[&str], fks: Vec<ForeignKey>) -> ObjectDetails {
+        ObjectDetails {
+            object: obj.clone(),
+            owner: None,
+            comment: None,
+            columns: cols
+                .iter()
+                .map(|c| Column {
+                    name: c.to_string(),
+                    data_type: "bigint".into(),
+                    nullable: *c != "id",
+                    default: None,
+                    identity: None,
+                    generated: None,
+                    collation: None,
+                    comment: None,
+                    primary_key: *c == "id",
+                    references: None,
+                })
+                .collect(),
+            indexes: vec![],
+            constraints: vec![],
+            triggers: vec![],
+            foreign_keys: fks,
+            referenced_by: vec![],
+            stats: None,
+            properties: vec![],
+            ddl: String::new(),
+        }
+    }
+    fn fetch(effects: &[Effect]) -> (u64, crate::db::data::Filter) {
+        effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::Db(DbCommand::FetchRows { id, request }) => {
+                    Some((*id, request.filter.clone()))
+                }
+                _ => None,
+            })
+            .expect("a fetch")
+    }
+
+    let mut app = connected_app();
+    key(&mut app, "2");
+    let orders = match db(key_effects(&mut app, "G enter")).as_slice() {
+        [DbCommand::LoadDetails(o)] => o.clone(),
+        other => panic!("expected details request, got {other:?}"),
+    };
+    let customers = ObjectRef {
+        name: "customers".into(),
+        ..orders.clone()
+    };
+    let fk = ForeignKey {
+        name: "orders_customer_id_fkey".into(),
+        from: orders.clone(),
+        from_columns: vec!["customer_id".into()],
+        to: customers.clone(),
+        to_columns: vec!["id".into()],
+        on_update: FkAction::NoAction,
+        on_delete: FkAction::NoAction,
+        origin: FkOrigin::Declared,
+    };
+    let effects = app.update(Msg::Db(DbEvent::DetailsLoaded {
+        details: Box::new(details(&orders, &["id", "customer_id"], vec![fk])),
+        elapsed: Duration::ZERO,
+    }));
+    let (id, _) = fetch(&effects);
+    app.update(Msg::Db(DbEvent::RowsLoaded {
+        id,
+        offset: 0,
+        rows: TextRows {
+            columns: vec!["id".into(), "customer_id".into()],
+            rows: vec![vec![Some("1".into()), Some("42".into())]],
+        },
+        elapsed: Duration::ZERO,
+    }));
+    app.data.filter.free_where = Some("id > 0".into());
+
+    // `gd` on `customer_id` opens `customers` filtered on id = 42.
+    key(&mut app, "l");
+    let effects = key_effects(&mut app, "g d");
+    assert_eq!(app.current.as_ref(), Some(&customers));
+    assert!(
+        db(effects)
+            .iter()
+            .any(|c| matches!(c, DbCommand::LoadDetails(o) if o == &customers))
+    );
+    let effects = app.update(Msg::Db(DbEvent::DetailsLoaded {
+        details: Box::new(details(&customers, &["id"], vec![])),
+        elapsed: Duration::ZERO,
+    }));
+    let (_, filter) = fetch(&effects);
+    assert_eq!(filter.conditions.len(), 1);
+    assert_eq!(filter.conditions[0].column, "id");
+    assert_eq!(filter.conditions[0].op, Op::Eq);
+    assert_eq!(filter.conditions[0].value, "42");
+
+    // `Ctrl+o` goes back to `orders` with its own filter.
+    let effects = key_effects(&mut app, "ctrl+o");
+    assert_eq!(app.current.as_ref(), Some(&orders));
+    let (_, filter) = fetch(&effects);
+    assert_eq!(filter.free_where.as_deref(), Some("id > 0"));
+    assert!(filter.conditions.is_empty());
+
+    // NULL / no reference: a message, no jump.
+    key(&mut app, "0");
+    key(&mut app, "g d");
+    assert_eq!(app.current.as_ref(), Some(&orders));
+}

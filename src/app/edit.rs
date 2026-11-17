@@ -150,6 +150,8 @@ impl App {
             After::Open(o) => self.open_object(o),
             After::Follow(o) => {
                 if let Some(cur) = self.current.take() {
+                    self.saved_filters
+                        .insert(cur.clone(), self.data.filter.clone());
                     self.back_stack.push(cur);
                 }
                 self.go_to(o)

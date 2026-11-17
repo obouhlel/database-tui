@@ -14,6 +14,7 @@ pub mod editor;
 pub mod export;
 pub mod export_dialog;
 pub mod filter_editor;
+pub mod follow;
 pub mod format;
 pub mod grid;
 pub mod input;
@@ -30,6 +31,7 @@ pub mod tree;
 pub mod validate;
 pub mod value;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -283,6 +285,12 @@ pub enum Overlay {
     },
     /// `E`: export to a file.
     Export(Box<export_dialog::ExportDialog>),
+    /// `gd` with several targets, `gr`: where to jump.
+    JumpList {
+        title: String,
+        jumps: Vec<follow::Jump>,
+        cursor: usize,
+    },
 }
 
 impl Overlay {
@@ -345,6 +353,11 @@ pub struct App {
     pub export_dir: Option<PathBuf>,
     /// Virtual foreign keys (`relations.toml`), merged into loaded details.
     pub relations: crate::config::relations::Relations,
+    /// `gd` / `gr` in flight: the filter to set once the target's Data
+    /// view exists.
+    pending_jump: Option<follow::Jump>,
+    /// Data filters of the tables left by a jump, restored on the way back.
+    saved_filters: HashMap<ObjectRef, crate::db::data::Filter>,
     /// Id of the export in flight.
     exporting: Option<u64>,
     /// Config / keymap warnings shown in the picker.
@@ -455,6 +468,8 @@ impl App {
             data_dir: None,
             export_dir: None,
             relations: Default::default(),
+            pending_jump: None,
+            saved_filters: HashMap::new(),
             exporting: None,
         }
     }
@@ -785,6 +800,7 @@ impl App {
             Some(Overlay::ConfirmTxnExit(_)) => return self.on_confirm_txn_exit_key(key),
             Some(Overlay::HistorySearch(_)) => return self.on_history_key(key),
             Some(Overlay::QueryList { .. }) => return self.on_query_list_key(key),
+            Some(Overlay::JumpList { .. }) => return self.on_jump_list_key(key),
             Some(Overlay::Export(_)) => return self.on_export_key(key),
             _ => {}
         }
@@ -825,6 +841,7 @@ impl App {
             | Overlay::ConfirmTxnExit(_)
             | Overlay::HistorySearch(_)
             | Overlay::QueryList { .. }
+            | Overlay::JumpList { .. }
             | Overlay::Export(_) => Vec::new(),
             Overlay::Error { .. } => {
                 if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) {
@@ -974,15 +991,7 @@ impl App {
         match action {
             NextSection => self.schema.cycle_section(1),
             PrevSection => self.schema.cycle_section(-1),
-            JumpBack => match self.back_stack.last() {
-                Some(_) => {
-                    if !self.guard(edit::After::Back) {
-                        let prev = self.back_stack.pop().expect("checked above");
-                        self.go_to(prev);
-                    }
-                }
-                None => self.notify(Level::Info, "Pas d'objet précédent"),
-            },
+            JumpBack => self.jump_back(),
             FollowLink => {
                 let target = self.schema.table().and_then(|t| t.selected_link()).cloned();
                 match target {
@@ -1097,6 +1106,19 @@ impl App {
     }
 
     /// Opens `obj` in the center panel and reveals it in the tree.
+    /// `Ctrl+o`: the object visited before the current one.
+    fn jump_back(&mut self) {
+        match self.back_stack.last() {
+            Some(_) => {
+                if !self.guard(edit::After::Back) {
+                    let prev = self.back_stack.pop().expect("checked above");
+                    self.go_to(prev);
+                }
+            }
+            None => self.notify(Level::Info, "Pas d'objet précédent"),
+        }
+    }
+
     /// The object's database is listed on its connection.
     fn has_database(&self, obj: &ObjectRef) -> bool {
         self.server(&obj.connection)
