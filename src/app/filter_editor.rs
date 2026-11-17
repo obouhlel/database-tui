@@ -70,8 +70,9 @@ impl FilterEditor {
             columns,
             rows,
             cursor: 0,
-            // A new condition starts on its value: the column is preselected.
-            field: if fresh { Field::Value } else { Field::Column },
+            // Starts on the column (preselected from the cursor for a new
+            // condition): Tab moves on to the operator, then the value.
+            field: Field::Column,
             combinator: filter.combinator,
         }
     }
@@ -242,6 +243,10 @@ mod tests {
     #[test]
     fn new_condition_on_current_column() {
         let mut e = FilterEditor::new(cols(), &Filter::default(), Some("status"));
+        assert_eq!(e.field, Field::Column);
+        assert_eq!(e.rows[0].column, 1);
+        e.handle_key(&k(KeyCode::Tab));
+        e.handle_key(&k(KeyCode::Tab));
         assert_eq!(e.field, Field::Value);
         typed(&mut e, "paid");
         assert_eq!(e.handle_key(&k(KeyCode::Enter)), Outcome::Apply);
@@ -258,7 +263,7 @@ mod tests {
     #[test]
     fn fields_ops_and_rows() {
         let mut e = FilterEditor::new(cols(), &Filter::default(), Some("id"));
-        e.handle_key(&k(KeyCode::BackTab)); // -> operator
+        e.handle_key(&k(KeyCode::Tab)); // -> operator
         typed(&mut e, ">");
         assert_eq!(e.rows[0].op, Op::Gt);
         e.handle_key(&k(KeyCode::Tab));

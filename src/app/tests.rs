@@ -662,6 +662,7 @@ mod data_tab {
 
         key(&mut app, "f");
         assert_eq!(app.mode(), Mode::Filter);
+        key(&mut app, "tab tab");
         typed(&mut app, "s4");
         let effects = key_effects(&mut app, "enter");
         assert_eq!(fetches(&effects).len(), 1);
