@@ -679,6 +679,75 @@ mod data_tab {
     }
 
     #[test]
+    fn pasting_into_filters_and_search() {
+        let mut app = data_app(1000);
+        key(&mut app, "/");
+        app.update(Msg::Paste("s14\n".into()));
+        assert_eq!(app.data.search.as_deref(), Some("s14"));
+        assert_eq!((app.data.grid.row, app.data.grid.col), (14, 1));
+        key(&mut app, "enter");
+
+        key(&mut app, "f");
+        // A copied cell ends with a newline: dropped.
+        app.update(Msg::Paste("  s7\n".into()));
+        match &app.overlay {
+            Some(Overlay::FilterEditor(e)) => assert_eq!(e.rows[0].value.text(), "s7"),
+            other => panic!("unexpected {other:?}"),
+        }
+        // Pasting while on the column field goes to the value.
+        key(&mut app, "shift+tab shift+tab ctrl+u");
+        app.update(Msg::Paste("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11".into()));
+        key(&mut app, "enter");
+        assert_eq!(
+            app.data.filter.conditions[0].value,
+            "s7a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"
+        );
+
+        key(&mut app, "F");
+        app.update(Msg::Paste("id > 5\nand id < 9".into()));
+        key(&mut app, "enter");
+        assert_eq!(
+            app.data.filter.free_where.as_deref(),
+            Some("id > 5 and id < 9")
+        );
+    }
+
+    #[test]
+    fn filter_on_the_current_cell() {
+        let mut app = data_app(1000);
+        key(&mut app, "j j l");
+        let effects = key_effects(&mut app, "*");
+        assert_eq!(fetches(&effects).len(), 1);
+        let c = &app.data.filter.conditions;
+        assert_eq!(c.len(), 1);
+        assert_eq!(
+            (c[0].column.as_str(), c[0].op, c[0].value.as_str()),
+            ("status", Op::Eq, "s2")
+        );
+        // Same column again: replaced, not added.
+        let id = fetches(&effects)[0].0;
+        app.update(Msg::Db(DbEvent::RowsLoaded {
+            id,
+            offset: 0,
+            rows: rows(5, 1),
+            elapsed: Duration::ZERO,
+        }));
+        let effects = key_effects(&mut app, "*");
+        assert_eq!(app.data.filter.conditions.len(), 1);
+        assert_eq!(app.data.filter.conditions[0].value, "s5");
+        let id = fetches(&effects)[0].0;
+        app.update(Msg::Db(DbEvent::RowsLoaded {
+            id,
+            offset: 0,
+            rows: rows(5, 1),
+            elapsed: Duration::ZERO,
+        }));
+        key(&mut app, "h *");
+        assert_eq!(app.data.filter.conditions.len(), 2);
+        assert_eq!(app.data.filter.conditions[1].column, "id");
+    }
+
+    #[test]
     fn search_copy_and_detail() {
         let mut app = data_app(1000);
         key(&mut app, "/");
@@ -1549,6 +1618,43 @@ mod sql {
         });
         assert_eq!(app.sql.editor.lines().len(), 2);
         assert_eq!(app.sql.file.as_deref(), Some("autre"));
+        // The text being written is kept in another script.
+        assert_eq!(app.sql.script_count(), 2);
+        key(&mut app, "alt+left");
+        assert_eq!(app.sql.editor.text(), "select 42");
+    }
+
+    #[test]
+    fn several_scripts() {
+        let mut app = sql_app();
+        write(&mut app, "select 1");
+        key(&mut app, "ctrl+t");
+        assert!(app.sql.editor.is_empty());
+        assert_eq!((app.sql.script, app.sql.script_count()), (1, 2));
+        write(&mut app, "select 2");
+        key(&mut app, "alt+left");
+        assert_eq!(app.sql.editor.text(), "select 1");
+        key(&mut app, "alt+left");
+        assert_eq!(app.sql.editor.text(), "select 2", "wraps around");
+        key(&mut app, "ctrl+p");
+        write(&mut app, "new\n");
+        assert_eq!(app.sql.script_count(), 3);
+        write(&mut app, "select 3");
+        // :close goes to a neighbour; the last one is only emptied.
+        key(&mut app, "ctrl+p");
+        write(&mut app, "close\n");
+        assert_eq!(app.sql.script_count(), 2);
+        assert_eq!(app.sql.editor.text(), "select 2");
+        key(&mut app, "alt+w alt+w");
+        assert_eq!(app.sql.script_count(), 1);
+        assert!(app.sql.editor.is_empty());
+        // :clear empties the current script, undoable.
+        write(&mut app, "select 4");
+        key(&mut app, "ctrl+p");
+        write(&mut app, "clear\n");
+        assert!(app.sql.editor.is_empty());
+        key(&mut app, "ctrl+z");
+        assert_eq!(app.sql.editor.text(), "select 4");
     }
 
     #[test]

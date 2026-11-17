@@ -94,6 +94,19 @@ impl FilterEditor {
             .collect()
     }
 
+    /// Pasted text goes into the value of the current row (surrounding
+    /// blanks and line breaks dropped: a copied cell ends with one).
+    pub fn paste(&mut self, text: &str) {
+        let Some(row) = self.rows.get_mut(self.cursor) else {
+            return;
+        };
+        if !row.op.has_value() {
+            row.op = Op::Eq;
+        }
+        self.field = Field::Value;
+        row.value.insert_str(text.trim());
+    }
+
     pub fn handle_key(&mut self, key: &KeyEvent) -> Outcome {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {

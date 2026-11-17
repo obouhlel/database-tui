@@ -155,6 +155,7 @@ actions! {
     SearchNext => "search_next", "Occurrence suivante";
     SearchPrev => "search_prev", "Occurrence précédente";
     FilterEditor => "filter_editor", "Filtre par colonne";
+    FilterByCell => "filter_by_cell", "Filtrer sur la valeur de la cellule (colonne = valeur)";
     FreeWhere => "free_where", "Filtre SQL libre (WHERE)";
     ClearFilters => "clear_filters", "Effacer les filtres";
     Sort => "sort", "Trier sur la colonne (asc, desc, aucun)";
@@ -186,6 +187,10 @@ actions! {
     HistorySearch => "history_search", "Rechercher dans l'historique";
     FocusResults => "focus_results", "Aller aux résultats";
     FocusEditor => "focus_editor", "Revenir à l'éditeur";
+    NewScript => "new_script", "Nouveau script SQL (les autres sont conservés)";
+    CloseScript => "close_script", "Fermer le script SQL courant";
+    NextScript => "next_script", "Script SQL suivant";
+    PrevScript => "prev_script", "Script SQL précédent";
     NextResult => "next_result", "Résultat suivant";
     PrevResult => "prev_result", "Résultat précédent";
 }
@@ -276,6 +281,7 @@ fn defaults() -> Vec<(Context, Action, &'static [&'static str])> {
         (Data, SearchNext, &["n"]),
         (Data, SearchPrev, &["N"]),
         (Data, FilterEditor, &["f"]),
+        (Data, FilterByCell, &["*"]),
         (Data, FreeWhere, &["F"]),
         (Data, ClearFilters, &["C"]),
         (Data, Sort, &["s"]),
@@ -309,6 +315,13 @@ fn defaults() -> Vec<(Context, Action, &'static [&'static str])> {
         (SqlResults, Explain, &["f6"]),
         (SqlResults, ExplainAnalyze, &["f7"]),
         (SqlEditor, FocusResults, &["ctrl+j"]),
+        (SqlEditor, NewScript, &["ctrl+t"]),
+        (SqlEditor, CloseScript, &["alt+w"]),
+        (SqlEditor, NextScript, &["alt+right", "ctrl+pagedown"]),
+        (SqlEditor, PrevScript, &["alt+left", "ctrl+pageup"]),
+        (SqlResults, NewScript, &["ctrl+t"]),
+        (SqlResults, NextScript, &["alt+right", "ctrl+pagedown"]),
+        (SqlResults, PrevScript, &["alt+left", "ctrl+pageup"]),
         (SqlResults, FocusEditor, &["i", "ctrl+k"]),
         (SqlResults, NextResult, &["]"]),
         (SqlResults, PrevResult, &["["]),

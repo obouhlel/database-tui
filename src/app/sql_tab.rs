@@ -108,17 +108,110 @@ pub struct SqlState {
     pub history: Vec<HistoryEntry>,
     /// Name of the saved query being edited.
     pub file: Option<String>,
+    /// Every open script; the slot at `script` is hollow: its content lives
+    /// in `editor` / `file` while it is the active one.
+    pub scripts: Vec<Script>,
+    pub script: usize,
     /// Completion popup.
     pub popup: Option<super::completion::CompletionPopup>,
     /// Columns for the completion, per database.
     pub columns: super::completion::ColumnsCache,
 }
 
+/// An open SQL script (one editor buffer).
+#[derive(Debug, Clone, Default)]
+pub struct Script {
+    pub editor: Editor,
+    pub file: Option<String>,
+}
+
 impl SqlState {
     pub fn new(mode: EditorMode, tab_width: usize) -> Self {
         Self {
             editor: Editor::new(mode, tab_width),
+            scripts: vec![Script::default()],
             ..Default::default()
+        }
+    }
+
+    pub fn script_count(&self) -> usize {
+        self.scripts.len().max(1)
+    }
+
+    /// Label of the script `i` (its saved name, else its number).
+    pub fn script_label(&self, i: usize) -> String {
+        let file = if i == self.script {
+            self.file.as_ref()
+        } else {
+            self.scripts.get(i).and_then(|s| s.file.as_ref())
+        };
+        match file {
+            Some(f) => format!("{} {f}", i + 1),
+            None => (i + 1).to_string(),
+        }
+    }
+
+    /// Makes the script `to` the active one.
+    pub fn switch_script(&mut self, to: usize) {
+        if self.scripts.is_empty() {
+            self.scripts.push(Script::default());
+        }
+        if to == self.script || to >= self.scripts.len() {
+            return;
+        }
+        let slot = &mut self.scripts[self.script];
+        std::mem::swap(&mut slot.editor, &mut self.editor);
+        std::mem::swap(&mut slot.file, &mut self.file);
+        self.script = to;
+        let slot = &mut self.scripts[to];
+        std::mem::swap(&mut slot.editor, &mut self.editor);
+        std::mem::swap(&mut slot.file, &mut self.file);
+        self.popup = None;
+    }
+
+    /// Opens an empty script after the current one and switches to it.
+    pub fn new_script(&mut self) {
+        if self.scripts.is_empty() {
+            self.scripts.push(Script::default());
+        }
+        let editor = Editor::new(self.editor.mode, self.editor.tab_width);
+        self.scripts
+            .insert(self.script + 1, Script { editor, file: None });
+        self.switch_script(self.script + 1);
+    }
+
+    /// Closes the current script; the last one is emptied instead.
+    pub fn close_script(&mut self) {
+        if self.scripts.len() <= 1 {
+            let editor = Editor::new(self.editor.mode, self.editor.tab_width);
+            self.editor = editor;
+            self.file = None;
+            self.popup = None;
+            return;
+        }
+        let closing = self.script;
+        let to = if closing + 1 < self.scripts.len() {
+            closing + 1
+        } else {
+            closing - 1
+        };
+        self.switch_script(to);
+        self.scripts.remove(closing);
+        if self.script > closing {
+            self.script -= 1;
+        }
+    }
+
+    /// Cycles through the scripts.
+    pub fn cycle_script(&mut self, forward: bool) {
+        let n = self.scripts.len();
+        if n > 1 {
+            let to = if forward {
+                (self.script + 1) % n
+            } else {
+                (self.script + n - 1) % n
+            };
+            self.switch_script(to);
         }
     }
 
@@ -273,6 +366,12 @@ impl App {
                 }
             }
             FocusEditor => self.sql.focus = SqlFocus::Editor,
+            NewScript => self.new_script(),
+            CloseScript => self.close_script(),
+            NextScript | PrevScript => {
+                self.sql.cycle_script(action == NextScript);
+                self.sql.focus = SqlFocus::Editor;
+            }
             NextResult | PrevResult => {
                 let n = self.sql.results.len();
                 if n > 1 {
@@ -799,7 +898,7 @@ impl App {
         self.overlay = Some(Overlay::HistorySearch(Box::new(s)));
     }
 
-    fn rank_history(&self, s: &mut HistorySearch) {
+    pub(super) fn rank_history(&self, s: &mut HistorySearch) {
         let h = &self.sql.history;
         let q = s.input.text().trim();
         s.cursor = 0;
@@ -869,6 +968,43 @@ impl App {
         Vec::new()
     }
 
+    // -------------------------------------------------------------- scripts
+
+    /// `Ctrl+t` / `:new`: a fresh script, the others are kept.
+    pub(super) fn new_script(&mut self) {
+        self.sql.new_script();
+        self.tab = Tab::Sql;
+        self.focus = Focus::Center;
+        self.sql.focus = SqlFocus::Editor;
+        self.notify(
+            Level::Info,
+            format!(
+                "Nouveau script ({}/{}) · Alt+← / Alt+→ pour changer",
+                self.sql.script + 1,
+                self.sql.script_count()
+            ),
+        );
+    }
+
+    /// `:close`: closes the current script (empties it if it is the last).
+    pub(super) fn close_script(&mut self) {
+        let last = self.sql.script_count() == 1;
+        self.sql.close_script();
+        self.sql.focus = SqlFocus::Editor;
+        self.notify(
+            Level::Info,
+            if last {
+                "Script vidé".to_string()
+            } else {
+                format!(
+                    "Script fermé ({}/{})",
+                    self.sql.script + 1,
+                    self.sql.script_count()
+                )
+            },
+        );
+    }
+
     // -------------------------------------------------------- saved queries
 
     pub(super) fn save_query(&mut self, name: Option<&str>) -> Vec<Effect> {
@@ -925,6 +1061,10 @@ impl App {
     }
 
     pub(super) fn on_query_loaded(&mut self, name: String, text: String) {
+        // Keep what is being written: open in a new script.
+        if !self.sql.editor.is_empty() {
+            self.sql.new_script();
+        }
         self.sql.editor.set_text(&text);
         self.sql.file = Some(name.clone());
         self.tab = Tab::Sql;

@@ -67,7 +67,23 @@ fn draw_header(frame: &mut Frame, app: &App, t: &Theme, area: Rect) {
             Style::new().fg(t.error).add_modifier(Modifier::BOLD),
         )),
     }
-    if let Some(f) = &app.sql.file {
+    let n = app.sql.script_count();
+    if n > 1 {
+        spans.push(Span::raw("  "));
+        for i in 0..n {
+            let label = format!(" {} ", app.sql.script_label(i));
+            if i == app.sql.script {
+                spans.push(Span::styled(
+                    label,
+                    Style::new()
+                        .fg(t.accent)
+                        .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+                ));
+            } else {
+                spans.push(Span::styled(label, t.dim()));
+            }
+        }
+    } else if let Some(f) = &app.sql.file {
         spans.push(Span::styled(format!("  {f}.sql"), t.dim()));
     }
     if let Some(run) = &app.sql.running {
@@ -103,7 +119,7 @@ fn draw_editor(frame: &mut Frame, app: &mut App, t: &Theme, area: Rect) {
                     "Écrivez une requête, puis Ctrl+Entrée (ou Ctrl+e) pour l'exécuter,",
                     t.dim(),
                 ),
-                Line::styled("F5 pour tout le script, Ctrl+r pour l'historique.", t.dim()),
+                Line::styled("F5 pour tout le script, Ctrl+r pour l'historique, Ctrl+t pour un autre script.", t.dim()),
             ]),
             area,
         );
