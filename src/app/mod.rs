@@ -714,6 +714,7 @@ impl App {
         {
             Resolved::Action(a) => self.dispatch(a),
             Resolved::Pending => Vec::new(),
+            Resolved::PendingWith(a) => self.dispatch(a),
             Resolved::Unbound => {
                 if key.code == KeyCode::Esc {
                     self.status = None;

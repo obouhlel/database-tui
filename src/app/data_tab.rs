@@ -138,6 +138,7 @@ impl App {
             action,
             EditCell
                 | InsertRow
+                | DuplicateRow
                 | DeleteRow
                 | Undo
                 | Redo

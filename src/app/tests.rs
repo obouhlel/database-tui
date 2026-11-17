@@ -707,10 +707,8 @@ mod data_tab {
         // Visual line selection over 3 rows, copied as TSV.
         key(&mut app, "V j j");
         assert_eq!(app.mode(), Mode::VisualLine);
-        key(&mut app, "y");
-        app.update(Msg::Tick); // `y` waits for a possible `yy`
-        std::thread::sleep(crate::keymap::SEQUENCE_TIMEOUT);
-        let effects = app.update(Msg::Tick);
+        // `y` copies at once, without waiting for a possible `yy`.
+        let effects = key_effects(&mut app, "y");
         assert!(
             effects
                 .iter()
@@ -863,6 +861,56 @@ mod data_tab {
         assert!(matches!(app.overlay, Some(Overlay::ConfirmDiscard)));
         key(&mut app, "o");
         assert!(app.pending_changes().is_none());
+    }
+
+    #[test]
+    fn duplicate_row_opens_the_copied_key() {
+        let mut app = data_app(1000);
+        key(&mut app, "j p");
+        // The bigint key is copied as is: the editor opens on it.
+        match &app.overlay {
+            Some(Overlay::CellEditor(ed)) => {
+                assert_eq!(ed.column, "id");
+                assert_eq!(ed.input.text(), "1");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        key(&mut app, "ctrl+u");
+        typed(&mut app, "5000");
+        key(&mut app, "enter");
+        assert_eq!(app.pending_changes().map(|c| c.inserted), Some(1));
+        assert_eq!(
+            app.data.staging.state.inserts[0],
+            vec![NewValue::Text("5000".into()), NewValue::Text("s1".into()),]
+        );
+        // `u` removes the duplicate and the key edit.
+        key(&mut app, "u u");
+        assert!(app.pending_changes().is_none());
+    }
+
+    #[test]
+    fn ctrl_g_inserts_a_uuid() {
+        let mut app = data_app(10);
+        key(&mut app, "l e ctrl+u ctrl+g");
+        let text = match &app.overlay {
+            Some(Overlay::CellEditor(ed)) => ed.input.text(),
+            other => panic!("unexpected {other:?}"),
+        };
+        assert!(uuid::Uuid::parse_str(&text).is_ok(), "{text}");
+        key(&mut app, "enter");
+        assert_eq!(app.pending_changes().map(|c| c.updated), Some(1));
+    }
+
+    #[test]
+    fn y_copies_the_cell_at_once() {
+        let mut app = data_app(10);
+        let effects = key_effects(&mut app, "j l y");
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::Copy(t) if t == "s1")),
+            "{effects:?}"
+        );
     }
 
     #[test]
