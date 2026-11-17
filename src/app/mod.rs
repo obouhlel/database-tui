@@ -19,6 +19,7 @@ pub mod grid;
 pub mod input;
 pub mod palette;
 pub mod plan;
+pub mod reference;
 pub mod schema_view;
 pub mod server;
 mod servers;
@@ -239,6 +240,8 @@ pub enum Overlay {
     RowDetail {
         scroll: u16,
     },
+    /// `K`: the row a foreign key cell points to.
+    Reference(Box<reference::ReferencePeek>),
     /// User / password / database for a discovered server.
     Login(Box<discovery::LoginForm>),
     /// `dd` on a connection: confirm its removal.
@@ -760,6 +763,7 @@ impl App {
             Some(Overlay::ConfirmApply { .. }) => return self.on_confirm_apply_key(key),
             Some(Overlay::ConfirmDiscard) => return self.on_confirm_discard_key(key),
             Some(Overlay::PendingChanges(_)) => return self.on_pending_changes_key(key),
+            Some(Overlay::Reference(_)) => return self.on_reference_key(key),
             _ => {}
         }
         if self.overlay.as_ref().is_some_and(Overlay::is_data) {
@@ -805,6 +809,7 @@ impl App {
             | Overlay::FilterEditor(_)
             | Overlay::CopyFormat { .. }
             | Overlay::RowDetail { .. }
+            | Overlay::Reference(_)
             | Overlay::Login(_)
             | Overlay::SaveServer(_)
             | Overlay::ConfirmDelete(_)
@@ -1310,6 +1315,10 @@ impl App {
             | DbEvent::RowsCounted { .. }
             | DbEvent::CountFailed { .. }) => {
                 self.on_data_event(ev);
+                Vec::new()
+            }
+            ev @ DbEvent::ReferenceLoaded { .. } => {
+                self.on_reference_event(ev);
                 Vec::new()
             }
             ev @ (DbEvent::ChangesApplied { .. } | DbEvent::ChangesFailed { .. }) => {

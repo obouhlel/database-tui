@@ -258,8 +258,9 @@ Couleurs : noms (`red`, `light-blue`, `orange`…), `#rrggbb` ou index ANSI (`20
 | | `gg` / `G`, `Ctrl+d`/`Ctrl+u`, `PgUp`/`PgDn` | Début / fin / demi-page / page (chargement paresseux) |
 | | `0`/`^` / `$`, `w` / `b` | Première / dernière colonne, colonne suivante / précédente |
 | | `Enter` | Vue détail de la ligne (JSON indenté, bytea, textes longs ; `[`/`]` ligne préc./suiv., `y` copie en JSON) |
+| | `K` · `gd` | Sur une clé étrangère : fenêtre avec la ligne référencée (`y` la copie en JSON) ; marche aussi sur un résultat SQL issu d'une table |
 | | `/`, `n` / `N` | Rechercher dans les valeurs chargées (insensible à la casse sauf majuscule), occurrence suivante / précédente |
-| | `f` | Filtre par colonne (`=`, `!=`, `<`, `<=`, `>`, `>=`, `LIKE`, `ILIKE`, `~`, `~*`, `IS NULL`, `IS NOT NULL`, AND / OR) |
+| | `f` | Filtre par colonne (`=`, `!=`, `<`, `<=`, `>`, `>=`, `LIKE`, `ILIKE`, `~`, `~*`, `IS NULL`, `IS NOT NULL`, AND / OR) ; s'ouvre sur le choix de la colonne (pré-sélectionnée), `Tab` passe à l'opérateur puis à la valeur |
 | | `F` / `C` | Filtre SQL libre (`WHERE …`) / effacer tous les filtres |
 | | `s` / `S` | Trier sur la colonne (asc → desc → aucun, multi-colonnes) / effacer le tri |
 | | `v` / `V` | Sélection de cellules / de lignes (`Esc` pour sortir) |

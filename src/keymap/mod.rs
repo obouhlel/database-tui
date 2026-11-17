@@ -144,6 +144,7 @@ actions! {
     NextColumn => "next_column", "Colonne suivante";
     PrevColumn => "prev_column", "Colonne précédente";
     Detail => "detail", "Vue détail de la ligne";
+    PeekReference => "peek_reference", "Ligne référencée par la clé étrangère";
     Visual => "visual", "Sélection de cellules";
     VisualLine => "visual_line", "Sélection de lignes";
     CopyRow => "copy_row", "Copier la ligne (TSV)";
@@ -260,6 +261,7 @@ fn defaults() -> Vec<(Context, Action, &'static [&'static str])> {
         (Data, FirstColumn, &["0", "^"]),
         (Data, LastColumn, &["$"]),
         (Data, Detail, &["enter"]),
+        (Data, PeekReference, &["K", "gd"]),
         (Data, Visual, &["v"]),
         (Data, VisualLine, &["V"]),
         (Data, Copy, &["y"]),

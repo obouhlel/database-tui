@@ -1765,3 +1765,58 @@ async fn worker_exports_a_whole_table() {
         }
     }
 }
+
+#[tokio::test]
+async fn fetch_the_row_a_foreign_key_points_to() {
+    let Some(url) = test_url() else { return };
+    let (tx, mut rx) = unbounded_channel();
+    let commands = worker::spawn(tx);
+    commands
+        .send(DbCommand::Connect {
+            request: Box::new(request(&url)),
+            resolve_password: true,
+        })
+        .unwrap();
+    let ev = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(ev, DbEvent::Connected { .. }), "{ev:?}");
+
+    let mut fetch = async |id: u64, column: &str, value: Option<&str>| {
+        commands
+            .send(DbCommand::FetchReference {
+                id,
+                object: obj("shop", "orders", ObjectKind::Table),
+                column: column.into(),
+                row: vec![
+                    ("id".into(), Some("1".into())),
+                    ("customer_id".into(), value.map(str::to_string)),
+                ],
+            })
+            .unwrap();
+        loop {
+            let ev = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if let DbEvent::ReferenceLoaded { id: got, result } = ev {
+                assert_eq!(got, id);
+                return result;
+            }
+        }
+    };
+
+    let r = fetch(1, "customer_id", Some("1")).await.unwrap();
+    assert_eq!(r.object.name, "customers");
+    assert_eq!(r.columns[0].0, "id");
+    assert_eq!(r.row.as_ref().unwrap()[0].as_deref(), Some("1"));
+
+    let r = fetch(2, "customer_id", Some("999999999")).await.unwrap();
+    assert!(r.row.is_none());
+
+    let e = fetch(3, "customer_id", None).await.unwrap_err();
+    assert!(e.contains("NULL"), "{e}");
+    let e = fetch(4, "id", Some("1")).await.unwrap_err();
+    assert!(e.contains("clé étrangère"), "{e}");
+}

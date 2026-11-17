@@ -22,6 +22,17 @@ use super::schema::ObjectDetails;
 use super::{Backend, ConnectError, ConnectRequest, ServerInfo};
 use crate::config::password;
 
+/// A row found through a foreign key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reference {
+    pub object: ObjectRef,
+    pub constraint: String,
+    /// `(name, type)` of every column of the referenced table.
+    pub columns: Vec<(String, String)>,
+    /// The matching row (`None`: nothing matches).
+    pub row: Option<Vec<Option<String>>>,
+}
+
 #[derive(Debug)]
 pub enum DbCommand {
     /// Opens the connection `request.conn.name`, replacing it if already
@@ -51,6 +62,14 @@ pub enum DbCommand {
         id: u64,
         request: Box<DataRequest>,
         bound: u64,
+    },
+    /// The row referenced by the foreign key of `column` in a row of
+    /// `object` (`row`: its values by column name).
+    FetchReference {
+        id: u64,
+        object: ObjectRef,
+        column: String,
+        row: Vec<(String, Option<String>)>,
     },
     /// Apply staged changes in one transaction.
     ApplyChanges {
@@ -155,6 +174,11 @@ pub enum DbEvent {
     RowsFailed {
         id: u64,
         error: String,
+    },
+    /// Answer to [`DbCommand::FetchReference`].
+    ReferenceLoaded {
+        id: u64,
+        result: Result<Box<Reference>, String>,
     },
     RowsCounted {
         id: u64,
@@ -457,6 +481,37 @@ async fn run(mut commands: UnboundedReceiver<DbCommand>, events: UnboundedSender
                         Err(error) => DbEvent::RowsFailed { id, error },
                     };
                     send(&events, ev);
+                });
+            }
+            DbCommand::FetchReference {
+                id,
+                object,
+                column,
+                row,
+            } => {
+                let Some(p) = pool(&pools, &object.connection) else {
+                    send(
+                        &events,
+                        DbEvent::ReferenceLoaded {
+                            id,
+                            result: Err("non connecté".into()),
+                        },
+                    );
+                    continue;
+                };
+                let events = events.clone();
+                tokio::spawn(async move {
+                    let result = match p.get(&object.database).await {
+                        Ok(b) => fetch_reference(b.as_ref(), &object, &column, &row).await,
+                        Err(e) => Err(e.to_string()),
+                    };
+                    send(
+                        &events,
+                        DbEvent::ReferenceLoaded {
+                            id,
+                            result: result.map(Box::new),
+                        },
+                    );
                 });
             }
             DbCommand::CountRows { id, request, bound } => {
@@ -890,4 +945,75 @@ fn not_connected() -> ApplyError {
 fn send(events: &UnboundedSender<DbEvent>, ev: DbEvent) {
     // The receiver only disappears when the app is shutting down.
     let _ = events.send(ev);
+}
+
+/// Finds the foreign key of `column`, then the row it points to.
+async fn fetch_reference(
+    b: &dyn Backend,
+    object: &ObjectRef,
+    column: &str,
+    row: &[(String, Option<String>)],
+) -> Result<Reference, String> {
+    use super::data::{Combinator, Condition, Filter, Op};
+    let details = b
+        .object_details(object)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    let fk = details
+        .foreign_keys
+        .iter()
+        .find(|fk| fk.from_columns.iter().any(|c| c == column))
+        .ok_or_else(|| format!("{column} n'est pas une clé étrangère"))?;
+    let mut conditions = Vec::new();
+    for (from, to) in fk.from_columns.iter().zip(&fk.to_columns) {
+        let value = row
+            .iter()
+            .find(|(n, _)| n == from)
+            .ok_or_else(|| format!("colonne {from} absente du résultat"))?
+            .1
+            .clone()
+            .ok_or_else(|| format!("{from} est NULL : aucune ligne référencée"))?;
+        conditions.push(Condition {
+            column: to.clone(),
+            op: Op::Eq,
+            value,
+        });
+    }
+    let target = b
+        .object_details(&fk.to)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    let columns: Vec<(String, String)> = target
+        .columns
+        .iter()
+        .map(|c| (c.name.clone(), c.data_type.clone()))
+        .collect();
+    let request = DataRequest {
+        object: fk.to.clone(),
+        columns: columns
+            .iter()
+            .map(|(name, data_type)| super::data::ColumnSpec {
+                name: name.clone(),
+                data_type: data_type.clone(),
+            })
+            .collect(),
+        filter: Filter {
+            conditions,
+            combinator: Combinator::And,
+            free_where: None,
+        },
+        sort: Vec::new(),
+        tiebreak: Vec::new(),
+        order_by_ctid: false,
+        with_row_version: false,
+        offset: 0,
+        limit: 1,
+    };
+    let rows = b.fetch_rows(&request).await.map_err(|e| format!("{e:#}"))?;
+    Ok(Reference {
+        object: fk.to.clone(),
+        constraint: fk.name.clone(),
+        columns,
+        row: rows.rows.into_iter().next(),
+    })
 }

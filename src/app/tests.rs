@@ -903,6 +903,48 @@ mod data_tab {
     }
 
     #[test]
+    fn peek_the_referenced_row() {
+        let mut app = data_app(10);
+        let effects = key_effects(&mut app, "j l K");
+        let id = match db(effects).as_slice() {
+            [
+                DbCommand::FetchReference {
+                    id, column, row, ..
+                },
+            ] => {
+                assert_eq!(column, "status");
+                assert_eq!(row[1], ("status".into(), Some("s1".into())));
+                *id
+            }
+            other => panic!("unexpected {other:?}"),
+        };
+        assert!(matches!(&app.overlay, Some(Overlay::Reference(p)) if p.result.is_none()));
+        let object = app.data.object.clone().unwrap();
+        app.update(Msg::Db(DbEvent::ReferenceLoaded {
+            id,
+            result: Ok(Box::new(crate::db::worker::Reference {
+                object,
+                constraint: "fk_status".into(),
+                columns: vec![("code".into(), "text".into())],
+                row: Some(vec![Some("s1".into())]),
+            })),
+        }));
+        assert!(matches!(&app.overlay, Some(Overlay::Reference(p)) if p.result.is_some()));
+        let effects = key_effects(&mut app, "y");
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::Copy(t) if t.contains("\"code\": \"s1\""))),
+            "{effects:?}"
+        );
+        key(&mut app, "esc");
+        assert!(app.overlay.is_none());
+        // A NULL value has nothing to point to.
+        key(&mut app, "g g j j j");
+        assert!(db(key_effects(&mut app, "K")).is_empty());
+    }
+
+    #[test]
     fn y_copies_the_cell_at_once() {
         let mut app = data_app(10);
         let effects = key_effects(&mut app, "j l y");
