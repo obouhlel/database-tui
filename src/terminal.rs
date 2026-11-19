@@ -38,9 +38,27 @@ impl Drop for TerminalGuard {
 /// distinguishable.
 pub fn enter(mouse: bool) -> io::Result<(Tui, TerminalGuard)> {
     install_panic_hook();
+    let guard = TerminalGuard;
+    setup(mouse)?;
+    let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+    terminal.clear()?;
+    Ok((terminal, guard))
+}
+
+/// Gives the terminal back to another program (an editor), then takes it
+/// again; the screen is redrawn from scratch afterwards.
+pub fn suspend<T>(tui: &mut Tui, f: impl FnOnce() -> T) -> io::Result<T> {
+    let mouse = MOUSE.load(Ordering::SeqCst);
+    restore();
+    let result = f();
+    setup(mouse)?;
+    tui.clear()?;
+    Ok(result)
+}
+
+fn setup(mouse: bool) -> io::Result<()> {
     enable_raw_mode()?;
     ACTIVE.store(true, Ordering::SeqCst);
-    let guard = TerminalGuard;
     let mut out = io::stdout();
     execute!(out, EnterAlternateScreen, EnableBracketedPaste)?;
     if supports_keyboard_enhancement().unwrap_or(false) {
@@ -57,9 +75,7 @@ pub fn enter(mouse: bool) -> io::Result<(Tui, TerminalGuard)> {
         execute!(out, EnableMouseCapture)?;
         MOUSE.store(true, Ordering::SeqCst);
     }
-    let mut terminal = Terminal::new(CrosstermBackend::new(out))?;
-    terminal.clear()?;
-    Ok((terminal, guard))
+    Ok(())
 }
 
 pub fn keyboard_enhanced() -> bool {

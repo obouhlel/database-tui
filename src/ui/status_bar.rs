@@ -104,10 +104,14 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
 fn right_segment(app: &App) -> Line<'static> {
     let t = &app.theme;
     if let Some(keys) = app.pending_keys() {
-        return Line::styled(
+        let pending = Span::styled(
             format!(" {keys}… "),
             Style::new().fg(t.warning).add_modifier(Modifier::BOLD),
         );
+        // `y` copies at once while waiting for `yy`: keep its message.
+        let mut spans = message(app).spans;
+        spans.push(pending);
+        return Line::from(spans);
     }
     if let Some(busy) = &app.busy {
         return Line::styled(
@@ -120,6 +124,11 @@ fn right_segment(app: &App) -> Line<'static> {
             Style::new().fg(t.info),
         );
     }
+    message(app)
+}
+
+fn message(app: &App) -> Line<'static> {
+    let t = &app.theme;
     if let Some(msg) = &app.status {
         let color = match msg.level {
             Level::Info => t.info,
@@ -127,7 +136,10 @@ fn right_segment(app: &App) -> Line<'static> {
             Level::Warning => t.warning,
             Level::Error => t.error,
         };
-        return Line::styled(format!(" {} ", msg.text), Style::new().fg(color));
+        return Line::from(Span::styled(
+            format!(" {} ", msg.text),
+            Style::new().fg(color),
+        ));
     }
     Line::default()
 }
@@ -174,6 +186,12 @@ pub fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
                     ),
                     "naviguer",
                 ),
+                (hint(Context::Picker, Action::AddConnection), "ajouter"),
+                (hint(Context::Picker, Action::EditConfig), "modifier"),
+                (
+                    hint(Context::Picker, Action::TestConnections),
+                    "tout tester",
+                ),
                 (hint(Context::Global, Action::CommandPalette), "commande"),
                 (hint(Context::Global, Action::Help), "aide"),
                 (hint(Context::Global, Action::Quit), "quitter"),
@@ -189,6 +207,9 @@ pub fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
                     "replier/déplier",
                 ),
                 (hint(Context::Tree, Action::Filter), "filtrer"),
+                (hint(Context::Tree, Action::AddConnection), "ajouter"),
+                (hint(Context::Tree, Action::EditConfig), "modifier"),
+                (hint(Context::Tree, Action::TestConnections), "tester"),
                 ("1/2/3".into(), "onglets"),
                 (hint(Context::Global, Action::FocusCenter), "panneau"),
                 (hint(Context::Tree, Action::ReloadCatalog), "recharger"),
@@ -223,15 +244,34 @@ pub fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
                     .unwrap_or_else(|| hint(Context::Global, Action::CommandPalette));
                 let mut v = vec![
                     (two(Action::ExecuteStatement), "exécuter"),
-                    (hint(Context::SqlEditor, Action::ExecuteScript), "script"),
+                    (
+                        hint(Context::SqlEditor, Action::ExecuteScript),
+                        "tout exécuter",
+                    ),
                     (
                         hint(Context::SqlEditor, Action::HistorySearch),
                         "historique",
                     ),
                     (hint(Context::SqlEditor, Action::FocusResults), "résultats"),
+                    (
+                        hint(Context::SqlEditor, Action::ClearEditor),
+                        "tout effacer",
+                    ),
+                ];
+                if app.sql.results.len() > 1 {
+                    v.push((
+                        format!(
+                            "{}/{}",
+                            hint(Context::SqlEditor, Action::PrevResult),
+                            hint(Context::SqlEditor, Action::NextResult)
+                        ),
+                        "onglet de résultat",
+                    ));
+                }
+                v.extend([
                     (hint(Context::Global, Action::FocusTree), "arbre"),
                     (palette, "commande"),
-                ];
+                ]);
                 if app.sql.running.is_some() {
                     v.insert(
                         0,
@@ -247,8 +287,18 @@ pub fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
                 if app.tab == crate::app::Tab::Sql
                     && app.sql.active_view().is_some_and(|v| v.object.is_some()) =>
             {
-                vec![
-                    (hint(Context::SqlResults, Action::FocusEditor), "éditeur"),
+                let mut v = vec![(hint(Context::SqlResults, Action::FocusEditor), "éditeur")];
+                if app.sql.results.len() > 1 {
+                    v.push((
+                        format!(
+                            "{}/{}",
+                            hint(Context::SqlResults, Action::PrevResult),
+                            hint(Context::SqlResults, Action::NextResult)
+                        ),
+                        "résultats",
+                    ));
+                }
+                v.extend([
                     (hint(Context::Data, Action::EditCell), "modifier"),
                     (hint(Context::Data, Action::InsertRow), "nouvelle ligne"),
                     (hint(Context::Data, Action::DuplicateRow), "dupliquer"),
@@ -259,7 +309,8 @@ pub fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
                     (hint(Context::Data, Action::ShowChanges), "changements"),
                     (hint(Context::Data, Action::ApplyChanges), "appliquer"),
                     (hint(Context::Data, Action::Export), "exporter"),
-                ]
+                ]);
+                v
             }
             (Screen::Main, Focus::Center) if app.tab == crate::app::Tab::Sql => vec![
                 (hint(Context::SqlResults, Action::FocusEditor), "éditeur"),

@@ -559,6 +559,12 @@ impl Editor {
             EditorMode::Classic => self.classic_key(key),
             EditorMode::Vim => match self.vim {
                 VimMode::Insert => self.vim_insert_key(key),
+                // Vim uses no Alt key: they are the application's shortcuts.
+                VimMode::Normal | VimMode::Visual | VimMode::VisualLine
+                    if key.modifiers.contains(KeyModifiers::ALT) =>
+                {
+                    EditOutcome::Ignored
+                }
                 VimMode::Normal => self.vim_normal_key(key),
                 VimMode::Visual | VimMode::VisualLine => self.vim_visual_key(key),
             },

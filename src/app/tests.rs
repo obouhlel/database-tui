@@ -1456,6 +1456,29 @@ mod sql {
     }
 
     #[test]
+    fn a_script_shows_one_tab_per_result_from_the_first() {
+        let mut app = sql_app();
+        write(
+            &mut app,
+            "select * from shop.orders;\nset search_path = shop;\nselect * from customers;",
+        );
+        let ex = executed(&key_effects(&mut app, "f5"));
+        let ex = executed(&done(&mut app, ex[0].0, rows_result(3)));
+        let ex = executed(&done(&mut app, ex[0].0, StatementResult::default()));
+        done(&mut app, ex[0].0, rows_result(2));
+        let labels: Vec<&str> = app.sql.results.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(labels, ["orders 3", "SET", "customers 2"]);
+        assert_eq!(app.sql.active, 0, "starts on the first result");
+        // From the editor, Alt+] / Alt+[ go through the results.
+        key(&mut app, "alt+]");
+        assert_eq!(app.sql.active, 1);
+        key(&mut app, "alt+] alt+]");
+        assert_eq!(app.sql.active, 0, "wraps around");
+        key(&mut app, "alt+[");
+        assert_eq!(app.sql.active, 2);
+    }
+
+    #[test]
     fn selection_runs_its_statements() {
         let mut app = sql_app();
         write(&mut app, "select 1;\nselect 2;\nselect 3;");
@@ -1790,6 +1813,33 @@ mod sql {
     }
 
     #[test]
+    fn clear_the_whole_editor() {
+        let mut app = sql_app();
+        write(&mut app, "select 1;\nselect 2;");
+        key(&mut app, "alt+c");
+        assert!(app.sql.editor.is_empty());
+        // One undo brings everything back.
+        key(&mut app, "ctrl+z");
+        assert_eq!(app.sql.editor.text(), "select 1;\nselect 2;");
+        // Also from the command line, and in vim normal mode.
+        key(&mut app, "ctrl+p");
+        write(&mut app, "clear");
+        key(&mut app, "enter");
+        assert!(app.sql.editor.is_empty());
+
+        let mut app = connected_app();
+        app.sql = crate::app::sql_tab::SqlState::new(crate::config::EditorMode::Vim, 4);
+        key(&mut app, "3");
+        write(&mut app, "iselect 1");
+        key(&mut app, "esc alt+c");
+        assert!(app.sql.editor.is_empty());
+        write(&mut app, "u");
+        assert_eq!(app.sql.editor.text(), "select 1");
+        // The text is intact: Alt+c was not read as vim's `c`.
+        assert_eq!(app.mode(), Mode::Normal);
+    }
+
+    #[test]
     fn no_connection_no_run() {
         let mut app = app_with(&["a"], None);
         key(&mut app, "3");
@@ -1965,4 +2015,185 @@ fn gd_follows_a_reference_filtered_and_ctrl_o_restores_the_previous_filter() {
     key(&mut app, "0");
     key(&mut app, "g d");
     assert_eq!(app.current.as_ref(), Some(&orders));
+}
+
+// ------------------------------------------------- editing config.toml
+
+mod config_edit {
+    use super::*;
+    use crate::app::config_edit::{ConfigEdit, EditRequest};
+    use crate::db::probe::ProbeOk;
+    use pretty_assertions::assert_eq;
+
+    fn with_path(mut app: App) -> App {
+        app.config_path = Some("/tmp/pgtui-test/config.toml".into());
+        app
+    }
+
+    fn probes(effects: Vec<Effect>) -> Vec<(u64, String)> {
+        db(effects)
+            .into_iter()
+            .filter_map(|c| match c {
+                DbCommand::Probe { id, conn } => Some((id, conn.name)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn ok() -> ProbeOk {
+        ProbeOk {
+            version: "16.4".into(),
+            user: "u".into(),
+            database: "d".into(),
+            tls: false,
+            elapsed: Duration::from_millis(5),
+        }
+    }
+
+    #[test]
+    fn keys_ask_for_the_editor() {
+        let mut app = with_path(app_with(&["a", "b"], None));
+        // Connections page: `e` on the selected connection, `a` adds.
+        key(&mut app, "j e");
+        assert_eq!(
+            app.edit_request.take(),
+            Some(EditRequest {
+                add: false,
+                connection: Some("b".into()),
+                line: None
+            })
+        );
+        key(&mut app, "a");
+        assert!(app.edit_request.take().is_some_and(|r| r.add));
+        // Tree and command line too.
+        key(&mut app, "esc");
+        key(&mut app, "e");
+        assert_eq!(
+            app.edit_request
+                .take()
+                .and_then(|r| r.connection)
+                .as_deref(),
+            Some("b")
+        );
+        key(&mut app, ":");
+        typed(&mut app, "add");
+        key(&mut app, "enter");
+        assert!(app.edit_request.take().is_some_and(|r| r.add));
+    }
+
+    #[test]
+    fn saved_connections_are_applied_then_tested() {
+        let mut app = with_path(app_with(&["a", "b", "c"], None));
+        let mut b = conn("b");
+        b.port = 6000;
+        let effects = app.update(Msg::ConfigEdited(ConfigEdit::Saved(vec![
+            conn("a"),
+            b,
+            conn("nouvelle"),
+        ])));
+        let names: Vec<&str> = app.servers.iter().map(|s| s.name()).collect();
+        assert_eq!(
+            names,
+            ["a", "b", "nouvelle"],
+            "c removed, order of the file"
+        );
+        assert_eq!(app.server("b").unwrap().conn.port, 6000);
+        let tested = probes(effects);
+        assert_eq!(
+            tested.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>(),
+            ["nouvelle", "b"],
+            "only the added and changed ones"
+        );
+        match &app.overlay {
+            Some(Overlay::Probes(v)) => {
+                assert_eq!(
+                    v.title,
+                    "Connexions 1 ajoutée(s), 1 modifiée(s), 1 retirée(s)"
+                );
+                assert!(!v.done());
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        app.update(Msg::Db(DbEvent::Probed {
+            id: tested[0].0,
+            result: Ok(ok()),
+        }));
+        app.update(Msg::Db(DbEvent::Probed {
+            id: tested[1].0,
+            result: Err("connection refused".into()),
+        }));
+        let Some(Overlay::Probes(v)) = &app.overlay else {
+            panic!("popup closed")
+        };
+        assert!(v.done());
+        assert_eq!(v.failed(), 1);
+        let msg = &app.status.as_ref().unwrap().text;
+        assert!(msg.contains("1 connexion(s) en échec sur 2"), "{msg}");
+        // `e` in the popup edits the selected connection.
+        key(&mut app, "j e");
+        assert_eq!(
+            app.edit_request
+                .take()
+                .and_then(|r| r.connection)
+                .as_deref(),
+            Some("b")
+        );
+    }
+
+    #[test]
+    fn unchanged_connections_keep_their_session() {
+        let mut app = with_path(connected_app());
+        let effects = app.update(Msg::ConfigEdited(ConfigEdit::Saved(vec![conn("local")])));
+        assert!(probes(effects).is_empty());
+        assert!(app.server("local").unwrap().is_connected());
+        assert!(app.overlay.is_none());
+        // A changed open connection is closed first.
+        let mut local = conn("local");
+        local.port = 6000;
+        let cmds = db(app.update(Msg::ConfigEdited(ConfigEdit::Saved(vec![local]))));
+        assert!(
+            cmds.iter().any(
+                |c| matches!(c, DbCommand::Disconnect { connection } if connection == "local")
+            )
+        );
+        assert!(cmds.iter().any(|c| matches!(c, DbCommand::Probe { .. })));
+        assert!(!app.server("local").unwrap().is_connected());
+    }
+
+    #[test]
+    fn invalid_file_reopens_on_the_error_line() {
+        let mut app = with_path(app_with(&["a"], None));
+        app.update(Msg::ConfigEdited(ConfigEdit::Invalid {
+            message: "invalid TOML".into(),
+            line: Some(12),
+        }));
+        assert!(matches!(app.overlay, Some(Overlay::ConfigInvalid { .. })));
+        key(&mut app, "e");
+        assert_eq!(
+            app.edit_request.take(),
+            Some(EditRequest {
+                add: false,
+                connection: None,
+                line: Some(12)
+            })
+        );
+        // Esc keeps the current connections.
+        app.update(Msg::ConfigEdited(ConfigEdit::Invalid {
+            message: "invalid TOML".into(),
+            line: None,
+        }));
+        key(&mut app, "esc");
+        assert!(app.overlay.is_none());
+        assert_eq!(app.servers.len(), 1);
+    }
+
+    #[test]
+    fn test_every_connection() {
+        let mut app = with_path(app_with(&["a", "b"], None));
+        let tested = probes(key_effects(&mut app, "T"));
+        assert_eq!(tested.len(), 2);
+        assert!(
+            matches!(&app.overlay, Some(Overlay::Probes(v)) if v.title == "Test des connexions")
+        );
+    }
 }

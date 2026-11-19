@@ -169,6 +169,9 @@ actions! {
     ConnectionsPage => "connections_page", "Page des connexions (serveurs détectés)";
     Disconnect => "disconnect", "Fermer la connexion";
     DeleteConnection => "delete_connection", "Supprimer la connexion de la liste";
+    AddConnection => "add_connection", "Ajouter une connexion (config.toml dans l'éditeur)";
+    EditConfig => "edit_config", "Modifier la connexion (config.toml dans l'éditeur)";
+    TestConnections => "test_connections", "Tester toutes les connexions";
     EditCell => "edit_cell", "Modifier la cellule";
     InsertRow => "insert_row", "Nouvelle ligne";
     DuplicateRow => "duplicate_row", "Dupliquer la ligne (ou les lignes sélectionnées)";
@@ -185,6 +188,7 @@ actions! {
     ExecuteStatement => "execute_statement", "Exécuter l'instruction sous le curseur (ou la sélection)";
     ExecuteScript => "execute_script", "Exécuter tout le script";
     HistorySearch => "history_search", "Rechercher dans l'historique";
+    ClearEditor => "clear_editor", "Effacer tout le SQL de l'éditeur (annulable)";
     FocusResults => "focus_results", "Aller aux résultats";
     FocusEditor => "focus_editor", "Revenir à l'éditeur";
     NewScript => "new_script", "Nouveau script SQL (les autres sont conservés)";
@@ -251,6 +255,12 @@ fn defaults() -> Vec<(Context, Action, &'static [&'static str])> {
         (Picker, Connect, &["enter"]),
         (Picker, Refresh, &["R"]),
         (Picker, Cancel, &["esc"]),
+        (Picker, AddConnection, &["a"]),
+        (Picker, EditConfig, &["e"]),
+        (Picker, TestConnections, &["T"]),
+        (Tree, AddConnection, &["a"]),
+        (Tree, EditConfig, &["e"]),
+        (Tree, TestConnections, &["T"]),
         (Schema, ScrollLeft, &["h", "left"]),
         (Schema, ScrollRight, &["l", "right"]),
         (Schema, FirstColumn, &["0"]),
@@ -307,8 +317,11 @@ fn defaults() -> Vec<(Context, Action, &'static [&'static str])> {
             ExecuteStatement,
             &["ctrl+enter", "alt+enter", "ctrl+e"],
         ),
-        (SqlEditor, ExecuteScript, &["ctrl+shift+enter", "f5"]),
+        (SqlEditor, ExecuteScript, &["f5", "ctrl+shift+enter"]),
+        (SqlEditor, NextResult, &["alt+]"]),
+        (SqlEditor, PrevResult, &["alt+["]),
         (SqlEditor, HistorySearch, &["ctrl+r"]),
+        (SqlEditor, ClearEditor, &["alt+c"]),
         (SqlEditor, Complete, &["ctrl+space", "ctrl+n"]),
         (SqlEditor, Explain, &["f6"]),
         (SqlEditor, ExplainAnalyze, &["f7"]),
@@ -323,8 +336,8 @@ fn defaults() -> Vec<(Context, Action, &'static [&'static str])> {
         (SqlResults, NextScript, &["alt+right", "ctrl+pagedown"]),
         (SqlResults, PrevScript, &["alt+left", "ctrl+pageup"]),
         (SqlResults, FocusEditor, &["i", "ctrl+k"]),
-        (SqlResults, NextResult, &["]"]),
-        (SqlResults, PrevResult, &["["]),
+        (SqlResults, NextResult, &["]", "alt+]"]),
+        (SqlResults, PrevResult, &["[", "alt+["]),
         (SqlResults, ExecuteStatement, &["ctrl+e", "alt+enter"]),
         (SqlResults, ExecuteScript, &["f5"]),
         (SqlResults, HistorySearch, &["ctrl+r"]),

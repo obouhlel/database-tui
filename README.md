@@ -71,6 +71,33 @@ discover_ports = [5432]    # ex. [5432, 5433]
 
 pgtui démarre directement sur l'écran principal : l'arbre à gauche, les données à droite. La racine de l'arbre liste **les connexions** (config.toml, `--url`, `DATABASE_URL`, serveurs ajoutés depuis la détection). `Entrée` ou `l` sur une connexion la connecte et la déplie ; plusieurs connexions peuvent être ouvertes en même temps, chacune avec son état (« connexion… », version du serveur, « erreur », « déconnecté »). `X` ferme la connexion sous le curseur, `dd` la retire de la liste et de `config.toml` après confirmation (aucune base n'est supprimée sur le serveur). La page des connexions et des serveurs détectés s'ouvre avec `Ctrl+n` ou `:connections`.
 
+## Ajouter, modifier et tester les connexions
+
+Sans quitter pgtui, `a` (ou `:add`) ouvre `config.toml` dans votre éditeur (`$VISUAL`, `$EDITOR`, sinon nano ou vi) sur un bloc `[[connections]]` prêt à compléter. Le bloc contient l'hôte, le port, l'utilisateur, la base, et en commentaire le mot de passe, le TLS, le tunnel et la couleur de production. `e` (ou `:config`) ouvre le fichier sur la connexion sélectionnée dans l'arbre ou la page des connexions.
+
+À la sortie de l'éditeur, pgtui relit le fichier et applique les changements : les connexions ajoutées apparaissent, les retirées disparaissent, et une connexion modifiée qui était ouverte est fermée. **Les connexions ajoutées ou modifiées sont testées aussitôt** (mot de passe, tunnel et TLS compris), avec une ligne par connexion : `✓` version et durée, ou `✗` et le message du serveur. Dans cette fenêtre, `e` corrige la connexion choisie, `r` reteste, `Entrée` l'ouvre dans l'arbre.
+
+Un bloc ajouté puis laissé tel quel est retiré. Si le fichier ne se lit plus (erreur TOML, champ inconnu), pgtui le signale avec la ligne fautive et garde les connexions actuelles ; `e` rouvre l'éditeur sur cette ligne. `T` (ou `:test`) teste toutes les connexions.
+
+En dehors de pgtui, pour un cron ou une CI :
+
+```
+pgtui --check-connections               # toutes les connexions de config.toml
+scripts/check-connections.sh prod       # même chose ; compile pgtui s'il n'est pas dans le PATH
+```
+
+```
+Test de 3 connexion(s) de ~/.config/pgtui/config.toml
+
+OK     globeformation  pgtui@localhost:5433/demo            PostgreSQL 16.15 · 15 ms
+OK     via-tunnel      pgtui@db.interne:5432/demo (tunnel)  PostgreSQL 16.15 · 116 ms
+ÉCHEC  prod            app@db.prod:5432/app                 mot de passe requis ou refusé : password authentication failed for user "app"
+
+2/3 connexion(s) OK
+```
+
+Les tests partent en parallèle, chacun limité à 20 s. Le code de sortie vaut 1 dès qu'une connexion échoue.
+
 ## Toutes les bases du serveur
 
 Sous chaque connexion, l'arbre affiche **toutes les bases** du serveur, avec leur taille (`pg_database`, hors modèles). La base de connexion est dépliée ; déplier une autre base ouvre une connexion vers elle, avec les mêmes identifiants, et charge ses schémas. Une base sans le droit `CONNECT` est marquée « accès refusé ». La barre de statut et l'en-tête des onglets indiquent la base de l'objet ouvert.
@@ -95,13 +122,13 @@ Rien n'est écrit en base tant que vous n'avez pas validé : chaque modification
 - **Éditeur** avec coloration, numéros de ligne, indentation automatique (un niveau de plus après une parenthèse ouvrante), annuler / rétablir. Deux jeux de touches au choix dans `[editor] mode` :
   - `classic` (défaut) : toujours en saisie ; `Shift` + flèches sélectionne, `Ctrl+z` / `Ctrl+y` annule / rétablit, `Ctrl+x` / `Ctrl+c` / `Ctrl+v` coupe / copie / colle, `Ctrl+a` sélectionne tout, `Ctrl+d` duplique la ligne, `Tab` / `Shift+Tab` indente la sélection. `Esc` passe aux résultats.
   - `vim` : modes normal / insertion / visuel (`v`, `V`) ; mouvements `h j k l w b e 0 ^ $ gg G` ; opérateurs `d c y` avec un mouvement, `dd cc yy D C x X J p P >> <<` ; `u` / `Ctrl+r`. En mode normal, les touches que vim n'utilise pas restent celles de l'appli (`q`, `:`, `?`, `Tab`, `1`/`2`/`3`).
-- **Exécution** : `Ctrl+Entrée` (ou `Ctrl+e`, `Alt+Entrée`) exécute l'instruction sous le curseur, ou toutes les instructions de la sélection ; `Ctrl+Shift+Entrée` ou `F5` exécute tout le script. Les instructions partent une par une (découpage sur `;` en respectant chaînes, commentaires, `$$…$$` et corps `BEGIN ATOMIC`), et le script s'arrête à la première erreur. Le curseur se place alors sur la position signalée par le serveur.
-- **Résultats** : un sous-onglet par instruction (`[` / `]`), dans le même tableau que l'onglet Data (navigation, recherche `/`, sélection, copie dans tous les formats, vue détail). Les nombres sont alignés selon leur type. Au plus 10 000 lignes sont gardées par résultat (le nombre total est indiqué). `Ctrl+j` va aux résultats, `i` ou `Ctrl+k` revient à l'éditeur.
+- **Exécution** : `Ctrl+Entrée` (ou `Ctrl+e`, `Alt+Entrée`) exécute l'instruction sous le curseur, ou toutes les instructions de la sélection ; `F5` (ou `Ctrl+Shift+Entrée`) exécute tout le script, avec un sous-onglet par instruction. Les instructions partent une par une (découpage sur `;` en respectant chaînes, commentaires, `$$…$$` et corps `BEGIN ATOMIC`), et le script s'arrête à la première erreur. Le curseur se place alors sur la position signalée par le serveur.
+- **Résultats** : un sous-onglet par instruction, nommé d'après la table lue (`orders 3`) ou le verbe (`UPDATE 12`). Après un script, le premier résultat qui a des lignes est affiché (ou l'erreur), et `]` / `[` passent aux suivants (`Alt+]` / `Alt+[` depuis l'éditeur). Avec beaucoup de résultats, la barre défile autour de l'onglet actif (`‹3` / `5›` : onglets masqués). Chaque résultat s'affiche dans le même tableau que l'onglet Data (navigation, recherche `/`, sélection, copie dans tous les formats, vue détail). Les nombres sont alignés selon leur type. Au plus 10 000 lignes sont gardées par résultat (le nombre total est indiqué). `Ctrl+j` va aux résultats, `i` ou `Ctrl+k` revient à l'éditeur.
 - **Cible** : la base de l'objet ouvert ou de la sélection dans l'arbre, affichée en tête de l'onglet. Les requêtes passent par la connexion `session` de cette base : une requête longue y fait attendre l'onglet Data. `Ctrl+c` annule la requête (`pg_cancel_backend` via le jeton d'annulation). Le `statement_timeout` de la configuration s'applique.
 - **Transactions manuelles** : `BEGIN`, `COMMIT`, `ROLLBACK` s'exécutent tels quels. La barre de statut et l'en-tête affichent « TRANSACTION » (et « TRANSACTION EN ÉCHEC » après une erreur, jusqu'au `ROLLBACK`). La cible reste fixe tant que la transaction est ouverte. Quitter ou fermer la connexion pendant une transaction demande confirmation (le serveur l'annule). L'application des changements de l'onglet Data est refusée sur une base où une transaction SQL est ouverte.
 - **Garde-fou** : un `UPDATE` ou un `DELETE` sans `WHERE` (hors sous-requêtes) demande une confirmation explicite avant l'exécution.
 - **Historique** persistant dans `~/.local/share/pgtui/history` (une ligne JSON par instruction : date, connexion, base, texte, succès, durée ; fichier en mode 600 ; 5 000 entrées). `Ctrl+r` (ou `:history`) ouvre une recherche floue, avec aperçu ; `Entrée` insère l'instruction dans l'éditeur.
-- **Plusieurs scripts** ouverts à la fois : `Ctrl+t` (ou `:new`) ouvre un script vide sans toucher aux autres, `Alt+←` / `Alt+→` (ou `Ctrl+PgUp` / `Ctrl+PgDn`) passe de l'un à l'autre, `Alt+w` (ou `:close`) ferme le script courant (le dernier est seulement vidé). `:clear` vide le script courant (annulable). Les scripts ouverts apparaissent dans l'en-tête de l'onglet.
+- **Plusieurs scripts** ouverts à la fois : `Ctrl+t` (ou `:new`) ouvre un script vide sans toucher aux autres, `Alt+←` / `Alt+→` (ou `Ctrl+PgUp` / `Ctrl+PgDn`) passe de l'un à l'autre, `Alt+w` (ou `:close`) ferme le script courant (le dernier est seulement vidé). `Alt+c` (ou `:clear`) vide le script courant (annulable). Les scripts ouverts apparaissent dans l'en-tête de l'onglet.
 - **Requêtes enregistrées** dans `~/.local/share/pgtui/queries/<nom>.sql` : `:save <nom>` (ou `:w`, sans nom pour réenregistrer), `:open <nom>` (ou `:e`), `:open` seul pour choisir dans la liste. Si le script courant n'est pas vide, la requête s'ouvre dans un nouveau script.
 - **Autocomplétion** (`Ctrl+Espace` ou `Ctrl+n`) selon le contexte : après `FROM`, `JOIN`, `UPDATE`, `INTO`, les tables et vues (qualifiées hors du `search_path`) et les schémas ; après `alias.` ou `table.`, les colonnes de cette table (alias résolus dans l'instruction courante) ; après `schéma.`, ses objets et fonctions ; ailleurs, les colonnes des tables de l'instruction, puis les mots-clés, fonctions et tables. La liste suit la frappe ; `Tab` ou `Entrée` insère, `Esc` ferme. Les colonnes de la base sont chargées une fois, à la première demande, par la connexion de catalogue.
 - **EXPLAIN** : `F6` affiche le plan estimé de l'instruction sous le curseur, `F7` le plan réel (`EXPLAIN ANALYZE, BUFFERS`). Le plan est un arbre : coût, lignes estimées et réelles, durée, boucles, conditions, tri, lignes écartées par les filtres, et la part du travail propre à chaque nœud (en rouge au-delà de 30 %). Une estimation fausse d'un facteur 10 est signalée. `EXPLAIN ANALYZE` exécute l'instruction dans une transaction annulée (ou un savepoint si une transaction est ouverte) : un `UPDATE` analysé ne modifie rien. `y` copie le plan en texte.
@@ -123,6 +150,8 @@ pgtui --connection <nom>       # ouvre directement une entrée de config.toml
 pgtui --url <URL>              # ajoute et ouvre une URL postgres:// ou "host=… user=…"
 pgtui --config <fichier>       # autre fichier de configuration
 pgtui --check-config           # valide la configuration et quitte
+pgtui --check-connections      # teste toutes les connexions et quitte (code 1 si une échoue)
+pgtui --check-connections prod recette   # seulement celles-ci
 ```
 
 Si `DATABASE_URL` est défini, il apparaît comme connexion supplémentaire dans l'arbre (sans connexion automatique).
@@ -262,10 +291,12 @@ Couleurs : noms (`red`, `light-blue`, `orange`…), `#rrggbb` ou index ANSI (`20
 | | `Enter` | Connecter / ouvrir l'objet / déplier le dossier |
 | | `X` | Fermer la connexion sous le curseur |
 | | `dd` | Retirer la connexion de la liste et de `config.toml` (confirmation) |
+| | `a` · `e` · `T` | Ajouter une connexion / modifier la connexion (`config.toml` dans l'éditeur, puis test) / tester toutes les connexions |
 | | `/` | Filtre flou (`schema.table` pour qualifier) |
 | | `Esc` | Effacer le filtre |
 | | `R` | Recharger la liste des bases et les catalogues |
 | Page connexions | `Enter` | Se connecter (formulaire utilisateur / mot de passe pour un serveur détecté) |
+| | `a` · `e` · `T` | Ajouter / modifier (dans l'éditeur, puis test) / tester toutes les connexions |
 | | `R` | Relancer la détection des serveurs locaux |
 | | `Esc` · `q` | Revenir à l'écran principal |
 | Onglet Schema | `[` / `]` | Section précédente / suivante (Colonnes, Index, Contraintes, Triggers, Relations, DDL, Infos) |
@@ -294,12 +325,13 @@ Couleurs : noms (`red`, `light-blue`, `orange`…), `#rrggbb` ou index ANSI (`20
 | | `R`, `Ctrl+c` | Relancer la requête, annuler une requête en cours |
 | | `E` | Exporter (CSV, TSV, JSON, INSERT) |
 | Onglet SQL | `Ctrl+Entrée` · `Ctrl+e` · `Alt+Entrée` | Exécuter l'instruction sous le curseur (ou la sélection) |
-| | `Ctrl+Shift+Entrée` · `F5` | Exécuter tout le script |
+| | `F5` · `Ctrl+Shift+Entrée` | Exécuter tout le script (un sous-onglet par résultat) |
 | | `Ctrl+r` | Historique (recherche floue) |
+| | `Alt+c` · `:clear` | Effacer tout le SQL de l'éditeur (`Ctrl+z`, ou `u` en vim, pour le récupérer) |
 | | `Ctrl+Espace` · `Ctrl+n` | Autocomplétion |
 | | `F6` / `F7` | EXPLAIN / EXPLAIN ANALYZE |
 | | `Ctrl+j` · `Esc` (classique) / `i` · `Ctrl+k` | Aller aux résultats / revenir à l'éditeur |
-| | `[` / `]` | Résultat précédent / suivant |
+| | `[` / `]` · `Alt+[` / `Alt+]` | Résultat précédent / suivant (`Alt+[` / `Alt+]` marchent aussi depuis l'éditeur) |
 | | `Ctrl+t` / `Alt+w` | Nouveau script / fermer le script courant |
 | | `Alt+←` / `Alt+→` · `Ctrl+PgUp` / `Ctrl+PgDn` | Script précédent / suivant |
 | | `Ctrl+c` | Annuler la requête en cours |
@@ -317,7 +349,7 @@ Couleurs : noms (`red`, `light-blue`, `orange`…), `#rrggbb` ou index ANSI (`20
 
 **Presse-papier** — `auto` utilise le presse-papier système (X11, Wayland, macOS, Windows) et bascule sur la séquence OSC 52 (copie via le terminal) en SSH ou si le presse-papier système est indisponible. Sous tmux, OSC 52 demande `set -g set-clipboard on`.
 
-Commandes : `:q` (`:q!` sans confirmation), `:help`, `:reload`, `:connect <nom>`, `:connections`, `:reconnect`, `:disconnect`, `:save [nom]`, `:open [nom]`, `:new`, `:close`, `:clear`, `:history`, `:schema`, `:data`, `:sql`.
+Commandes : `:q` (`:q!` sans confirmation), `:help`, `:reload`, `:connect <nom>`, `:connections`, `:reconnect`, `:disconnect`, `:save [nom]`, `:open [nom]`, `:new`, `:close`, `:clear`, `:config`, `:add`, `:test`, `:history`, `:schema`, `:data`, `:sql`.
 
 Les terminaux compatibles avec le protocole clavier kitty (kitty, WezTerm, Ghostty, foot, Alacritty récent) distinguent `Ctrl+Enter` d'`Enter` ; pgtui l'active automatiquement. Ailleurs (tmux, gnome-terminal), des touches de repli seront toujours proposées.
 
@@ -327,9 +359,11 @@ Les terminaux compatibles avec le protocole clavier kitty (kitty, WezTerm, Ghost
 src/
 ├── main.rs          CLI, chargement config, logs, runtime tokio
 ├── run.rs           boucle d'événements unique (clavier, événements DB, tick, signaux)
-├── terminal.rs      raw mode / écran alternatif, restauration garantie (Drop + hook de panic)
+├── terminal.rs      raw mode / écran alternatif, restauration garantie (Drop + hook de panic), suspension pour l'éditeur
+├── external_editor.rs  $VISUAL / $EDITOR sur une ligne donnée (+N, ou fichier:N pour code, hx, subl, zed)
+├── check.rs         pgtui --check-connections : tests en parallèle et rapport
 ├── clipboard.rs     presse-papier système + repli OSC 52
-├── config/          config.toml (serde), mots de passe, ~/.pgpass, relations.toml
+├── config/          config.toml (serde), mots de passe, ~/.pgpass, relations.toml, bloc modèle d'une connexion
 ├── sql/             quoting des identifiants/littéraux, lexer SQL (coloration), découpage des scripts
 ├── storage.rs       historique et requêtes enregistrées (répertoire de données)
 ├── db/
@@ -339,6 +373,7 @@ src/
 │   ├── changes.rs   changements en attente (UPDATE / INSERT / DELETE) et résultat de leur application
 │   ├── postgres/    tokio-postgres + rustls : connexions, TLS, catalogue, détails, DDL
 │   ├── discover.rs  détection des serveurs locaux (SSLRequest)
+│   ├── probe.rs     test d'une connexion (mot de passe, tunnel, TLS, version) puis fermeture
 │   └── worker.rs    tâche qui possède les connexions (une par base, ouvertes à la demande) ; DbCommand → DbEvent
 ├── app/             état + reducer (aucune I/O) : App::update(Msg) -> Vec<Effect>
 ├── keymap/          touches → actions par contexte, séquences, surcharges

@@ -9,8 +9,10 @@ use futures::StreamExt;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc::unbounded_channel;
 
+use crate::app::config_edit::{ConfigEdit, EditRequest};
 use crate::app::{App, Effect, Level, Msg};
 use crate::clipboard::Clipboard;
+use crate::config::edit as config_edit_text;
 use crate::db::worker;
 use crate::terminal::Tui;
 use crate::ui;
@@ -52,11 +54,73 @@ pub async fn run(terminal: &mut Tui, mut app: App) -> Result<()> {
         for effect in app.update(msg) {
             run_effect(effect, &commands, &mut clipboard, &mut app)?;
         }
+        if let Some(req) = app.edit_request.take() {
+            // The key reader must not compete with the editor for stdin:
+            // a fresh one is created, read only once the editor is done.
+            input = crossterm::event::EventStream::new();
+            let edit = edit_config(terminal, &app, &req)?;
+            for effect in app.update(Msg::ConfigEdited(edit)) {
+                run_effect(effect, &commands, &mut clipboard, &mut app)?;
+            }
+        }
         if app.should_quit {
             break;
         }
     }
     Ok(())
+}
+
+/// Opens `config.toml` in the user's editor (with the terminal handed
+/// over), then reads it back.
+fn edit_config(terminal: &mut Tui, app: &App, req: &EditRequest) -> Result<ConfigEdit> {
+    let Some(path) = app.config_path.clone() else {
+        return Ok(ConfigEdit::Failed(
+            "Fichier de configuration inconnu".into(),
+        ));
+    };
+    let original = std::fs::read_to_string(&path).unwrap_or_default();
+    let (written, line) = if req.add {
+        let (text, line) = config_edit_text::with_template(&original, &app.config.connections);
+        if let Err(e) = std::fs::write(&path, &text) {
+            return Ok(ConfigEdit::Failed(format!(
+                "Écriture impossible : {} : {e}",
+                path.display()
+            )));
+        }
+        (Some(text), line)
+    } else {
+        let line = req
+            .line
+            .or_else(|| {
+                req.connection
+                    .as_deref()
+                    .and_then(|n| config_edit_text::connection_line(&original, n))
+            })
+            .unwrap_or(1);
+        (None, line)
+    };
+    let opened = crate::terminal::suspend(terminal, || crate::external_editor::open(&path, line))?;
+    let after = std::fs::read_to_string(&path).unwrap_or_default();
+    // An untouched template is taken back out.
+    if let Some(written) = &written
+        && after == *written
+    {
+        let _ = std::fs::write(&path, &original);
+        return Ok(match opened {
+            Ok(()) => ConfigEdit::NothingAdded,
+            Err(e) => ConfigEdit::Failed(format!("{e:#}")),
+        });
+    }
+    if let Err(e) = opened {
+        return Ok(ConfigEdit::Failed(format!("{e:#}")));
+    }
+    Ok(match crate::config::Config::parse(&after, &path) {
+        Ok((config, _)) => ConfigEdit::Saved(config.connections),
+        Err(e) => ConfigEdit::Invalid {
+            line: config_edit_text::error_line(&e, &after),
+            message: e.to_string(),
+        },
+    })
 }
 
 fn run_effect(

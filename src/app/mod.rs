@@ -6,6 +6,7 @@
 //! keeps it unit-testable.
 
 pub mod completion;
+pub mod config_edit;
 mod data_tab;
 pub mod data_view;
 pub mod discovery;
@@ -66,6 +67,8 @@ pub enum Msg {
         name: String,
         text: String,
     },
+    /// Back from editing `config.toml`.
+    ConfigEdited(config_edit::ConfigEdit),
 }
 
 /// Side effects requested by the reducer, executed by the event loop.
@@ -242,6 +245,13 @@ pub enum Overlay {
     RowDetail {
         scroll: u16,
     },
+    /// Connection tests (after editing `config.toml`, or `T`).
+    Probes(Box<config_edit::ProbeView>),
+    /// `config.toml` no longer parses after editing.
+    ConfigInvalid {
+        message: String,
+        line: Option<usize>,
+    },
     /// `K`: the row a foreign key cell points to.
     Reference(Box<reference::ReferencePeek>),
     /// User / password / database for a discovered server.
@@ -381,6 +391,8 @@ pub struct App {
     rerun_results: bool,
     /// Suggestion chosen in the command palette (`None`: the typed text).
     pub palette_cursor: Option<usize>,
+    /// Set by `a` / `e`: the event loop opens `config.toml` in the editor.
+    pub edit_request: Option<config_edit::EditRequest>,
     /// Action postponed until the pending changes are applied.
     after_apply: Option<edit::After>,
     /// What each change of the apply in flight refers to.
@@ -448,6 +460,7 @@ impl App {
             request_seq: 0,
             after_apply: None,
             palette_cursor: None,
+            edit_request: None,
             overlay_in_results: false,
             apply_in_results: None,
             rerun_results: false,
@@ -598,6 +611,10 @@ impl App {
                 self.on_query_loaded(name, text);
                 Vec::new()
             }
+            Msg::ConfigEdited(edit) => {
+                self.dirty = true;
+                self.on_config_edited(edit)
+            }
         }
     }
 
@@ -678,7 +695,8 @@ impl App {
             matches!(s.state, server::ConnState::Connecting(_))
                 || s.databases.iter().any(|d| d.loading)
         });
-        if self.busy.is_some() || self.discovering || loading {
+        let probing = matches!(&self.overlay, Some(Overlay::Probes(v)) if !v.done());
+        if self.busy.is_some() || self.discovering || loading || probing {
             self.spinner = self.spinner.wrapping_add(1);
             self.dirty = true;
         }
@@ -811,6 +829,8 @@ impl App {
             Some(Overlay::ConfirmDiscard) => return self.on_confirm_discard_key(key),
             Some(Overlay::PendingChanges(_)) => return self.on_pending_changes_key(key),
             Some(Overlay::Reference(_)) => return self.on_reference_key(key),
+            Some(Overlay::Probes(_)) => return self.on_probes_key(key),
+            Some(Overlay::ConfigInvalid { .. }) => return self.on_config_invalid_key(key),
             _ => {}
         }
         if self.overlay.as_ref().is_some_and(Overlay::is_data) {
@@ -858,6 +878,8 @@ impl App {
             | Overlay::CopyFormat { .. }
             | Overlay::RowDetail { .. }
             | Overlay::Reference(_)
+            | Overlay::Probes(_)
+            | Overlay::ConfigInvalid { .. }
             | Overlay::Login(_)
             | Overlay::SaveServer(_)
             | Overlay::ConfirmDelete(_)
@@ -983,6 +1005,18 @@ impl App {
                     format!("Rien à annuler — {quit} ou :q pour quitter"),
                 );
             }
+            AddConnection => self.ask_add_connection(),
+            EditConfig => {
+                let selected = match self.screen {
+                    Screen::Picker => match self.picker_item(self.picker_cursor) {
+                        Some(discovery::PickerItem::Configured(c)) => Some(c.name.clone()),
+                        _ => None,
+                    },
+                    Screen::Main => self.tree.selected_connection().map(str::to_string),
+                };
+                self.ask_edit_config(selected);
+            }
+            TestConnections => return self.test_all_connections(),
             _ if self.screen == Screen::Picker => return self.dispatch_picker(action),
             FocusTree => self.focus = Focus::Tree,
             FocusCenter => self.focus = Focus::Center,
@@ -1342,15 +1376,18 @@ impl App {
             "open" | "e" => return self.open_query(arg),
             "new" | "enew" => self.new_script(),
             "close" => self.close_script(),
-            "clear" => {
-                self.sql.editor.set_text("");
-                self.switch_tab(Tab::Sql);
-                self.notify(Level::Info, "Script vidé (u / Ctrl+z pour annuler)");
-            }
+            "config" => self.ask_edit_config(None),
+            "add" => self.ask_add_connection(),
+            "test" => return self.test_all_connections(),
             "history" => {
                 self.tab = Tab::Sql;
                 self.focus = Focus::Center;
                 return self.dispatch_sql(Action::HistorySearch);
+            }
+            "clear" => {
+                self.switch_tab(Tab::Sql);
+                self.focus = Focus::Center;
+                self.clear_editor();
             }
             "schema" => self.tab = Tab::Schema,
             "data" => self.tab = Tab::Data,
@@ -1377,6 +1414,10 @@ impl App {
             ("save [nom]", "Enregistrer la requête de l'onglet SQL"),
             ("open [nom]", "Ouvrir une requête enregistrée"),
             ("history", "Rechercher dans l'historique SQL"),
+            ("clear", "Effacer tout le SQL de l'éditeur"),
+            ("config", "Modifier config.toml dans l'éditeur ($EDITOR)"),
+            ("add", "Ajouter une connexion (config.toml dans l'éditeur)"),
+            ("test", "Tester toutes les connexions"),
             ("schema | data | sql", "Changer d'onglet"),
         ]
     }
@@ -1390,6 +1431,10 @@ impl App {
             | DbEvent::RowsCounted { .. }
             | DbEvent::CountFailed { .. }) => {
                 self.on_data_event(ev);
+                Vec::new()
+            }
+            ev @ DbEvent::Probed { .. } => {
+                self.on_probe_event(ev);
                 Vec::new()
             }
             ev @ DbEvent::ReferenceLoaded { .. } => {

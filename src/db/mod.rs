@@ -8,6 +8,7 @@ pub mod data;
 pub mod discover;
 pub mod exec;
 pub mod postgres;
+pub mod probe;
 pub mod schema;
 pub mod tunnel;
 pub mod worker;

@@ -358,6 +358,7 @@ impl App {
             }
             ExecuteScript => return self.execute(true),
             HistorySearch => self.open_history_search(),
+            ClearEditor => self.clear_editor(),
             FocusResults => {
                 if self.sql.results.is_empty() {
                     self.notify(Level::Info, "Aucun résultat");
@@ -390,6 +391,20 @@ impl App {
             _ => {}
         }
         Vec::new()
+    }
+
+    /// `Alt+c` / `:clear`: empties the editor, as one undo step.
+    pub(super) fn clear_editor(&mut self) {
+        if self.sql.editor.is_empty() {
+            self.notify(Level::Info, "L'éditeur est déjà vide");
+            return;
+        }
+        self.sql.editor.set_text("");
+        self.sql.focus = SqlFocus::Editor;
+        self.notify(
+            Level::Info,
+            "SQL effacé — Ctrl+z (ou u en vim) pour le récupérer",
+        );
     }
 
     /// Database the next statement runs on.
@@ -781,13 +796,20 @@ impl App {
             label: "SQL".into(),
             elapsed,
         });
-        // Show the last result with rows, else the last one.
+        // The error if any (the run stops on it), else the first result
+        // with rows: `]` then goes through the others in order.
         let n = self.sql.results.len();
         self.sql.active = self
             .sql
             .results
             .iter()
-            .rposition(|r| r.view.is_some() || r.error || r.plan.is_some())
+            .position(|r| r.error)
+            .or_else(|| {
+                self.sql
+                    .results
+                    .iter()
+                    .position(|r| r.view.is_some() || r.plan.is_some())
+            })
             .unwrap_or(n.saturating_sub(1));
         let done = self.sql.results.iter().filter(|r| !r.error).count();
         match error {
@@ -1087,7 +1109,12 @@ fn result_tab(
         if r.truncated {
             msg.push_str(&format!(" — {} premières affichées", r.rows.len()));
         }
-        (format!("{verb} {n}"), msg)
+        // A result named by its table reads better in a row of tabs.
+        let label = match script::main_table(stmt) {
+            Some(table) => format!("{table} {n}"),
+            None => format!("{verb} {n}"),
+        };
+        (label, msg)
     } else if matches!(
         verb.as_str(),
         "INSERT" | "UPDATE" | "DELETE" | "MERGE" | "COPY"
