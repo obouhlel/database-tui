@@ -346,6 +346,14 @@ pub fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
                 (hint(Context::Data, Action::InsertRow), "nouvelle ligne"),
                 (hint(Context::Data, Action::Detail), "détail"),
                 (hint(Context::Data, Action::PeekReference), "réf. FK"),
+                (
+                    format!(
+                        "{}/{}",
+                        hint(Context::Data, Action::FollowReference),
+                        hint(Context::Data, Action::ShowReferences)
+                    ),
+                    "suivre/références",
+                ),
                 (hint(Context::Data, Action::Search), "chercher"),
                 (hint(Context::Data, Action::FilterEditor), "filtrer"),
                 (hint(Context::Data, Action::FreeWhere), "WHERE"),

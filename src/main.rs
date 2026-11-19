@@ -30,6 +30,9 @@ fn real_main(cli: Cli) -> Result<()> {
         .unwrap_or_else(|| paths.config_file.clone());
     let (config, mut warnings, created) = Config::load_or_create(&config_path)?;
 
+    let relations_path = pgtui::config::relations::Relations::path_for(&config_path);
+    let (relations, relations_warning) = pgtui::config::relations::Relations::load(&relations_path);
+    warnings.extend(relations_warning);
     let (keymap, km_warnings) = Keymap::with_overrides(&config.keymap);
     let (theme, theme_warnings) = Theme::from_config(&config.general.theme, &config.theme);
     warnings.extend(km_warnings);
@@ -41,6 +44,13 @@ fn real_main(cli: Cli) -> Result<()> {
             config_path.display(),
             config.connections.len()
         );
+        if !relations.is_empty() {
+            println!(
+                "{}: OK ({} relation(s))",
+                relations_path.display(),
+                relations.list.len()
+            );
+        }
         for w in &warnings {
             println!("warning: {w}");
         }
@@ -95,6 +105,7 @@ fn real_main(cli: Cli) -> Result<()> {
     let mouse = config.general.mouse;
     let mut app = App::new(config, keymap, theme, warnings, extra, start);
     app.config_path = Some(config_path.clone());
+    app.relations = relations;
     app.sql.history = pgtui::storage::load_history(&pgtui::storage::history_path(&paths.data_dir));
     app.data_dir = Some(paths.data_dir.clone());
     app.export_dir = std::env::current_dir().ok();

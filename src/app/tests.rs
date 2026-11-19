@@ -679,6 +679,75 @@ mod data_tab {
     }
 
     #[test]
+    fn pasting_into_filters_and_search() {
+        let mut app = data_app(1000);
+        key(&mut app, "/");
+        app.update(Msg::Paste("s14\n".into()));
+        assert_eq!(app.data.search.as_deref(), Some("s14"));
+        assert_eq!((app.data.grid.row, app.data.grid.col), (14, 1));
+        key(&mut app, "enter");
+
+        key(&mut app, "f");
+        // A copied cell ends with a newline: dropped.
+        app.update(Msg::Paste("  s7\n".into()));
+        match &app.overlay {
+            Some(Overlay::FilterEditor(e)) => assert_eq!(e.rows[0].value.text(), "s7"),
+            other => panic!("unexpected {other:?}"),
+        }
+        // Pasting while on the column field goes to the value.
+        key(&mut app, "shift+tab shift+tab ctrl+u");
+        app.update(Msg::Paste("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11".into()));
+        key(&mut app, "enter");
+        assert_eq!(
+            app.data.filter.conditions[0].value,
+            "s7a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"
+        );
+
+        key(&mut app, "F");
+        app.update(Msg::Paste("id > 5\nand id < 9".into()));
+        key(&mut app, "enter");
+        assert_eq!(
+            app.data.filter.free_where.as_deref(),
+            Some("id > 5 and id < 9")
+        );
+    }
+
+    #[test]
+    fn filter_on_the_current_cell() {
+        let mut app = data_app(1000);
+        key(&mut app, "j j l");
+        let effects = key_effects(&mut app, "*");
+        assert_eq!(fetches(&effects).len(), 1);
+        let c = &app.data.filter.conditions;
+        assert_eq!(c.len(), 1);
+        assert_eq!(
+            (c[0].column.as_str(), c[0].op, c[0].value.as_str()),
+            ("status", Op::Eq, "s2")
+        );
+        // Same column again: replaced, not added.
+        let id = fetches(&effects)[0].0;
+        app.update(Msg::Db(DbEvent::RowsLoaded {
+            id,
+            offset: 0,
+            rows: rows(5, 1),
+            elapsed: Duration::ZERO,
+        }));
+        let effects = key_effects(&mut app, "*");
+        assert_eq!(app.data.filter.conditions.len(), 1);
+        assert_eq!(app.data.filter.conditions[0].value, "s5");
+        let id = fetches(&effects)[0].0;
+        app.update(Msg::Db(DbEvent::RowsLoaded {
+            id,
+            offset: 0,
+            rows: rows(5, 1),
+            elapsed: Duration::ZERO,
+        }));
+        key(&mut app, "h *");
+        assert_eq!(app.data.filter.conditions.len(), 2);
+        assert_eq!(app.data.filter.conditions[1].column, "id");
+    }
+
+    #[test]
     fn search_copy_and_detail() {
         let mut app = data_app(1000);
         key(&mut app, "/");
@@ -1572,6 +1641,43 @@ mod sql {
         });
         assert_eq!(app.sql.editor.lines().len(), 2);
         assert_eq!(app.sql.file.as_deref(), Some("autre"));
+        // The text being written is kept in another script.
+        assert_eq!(app.sql.script_count(), 2);
+        key(&mut app, "alt+left");
+        assert_eq!(app.sql.editor.text(), "select 42");
+    }
+
+    #[test]
+    fn several_scripts() {
+        let mut app = sql_app();
+        write(&mut app, "select 1");
+        key(&mut app, "ctrl+t");
+        assert!(app.sql.editor.is_empty());
+        assert_eq!((app.sql.script, app.sql.script_count()), (1, 2));
+        write(&mut app, "select 2");
+        key(&mut app, "alt+left");
+        assert_eq!(app.sql.editor.text(), "select 1");
+        key(&mut app, "alt+left");
+        assert_eq!(app.sql.editor.text(), "select 2", "wraps around");
+        key(&mut app, "ctrl+p");
+        write(&mut app, "new\n");
+        assert_eq!(app.sql.script_count(), 3);
+        write(&mut app, "select 3");
+        // :close goes to a neighbour; the last one is only emptied.
+        key(&mut app, "ctrl+p");
+        write(&mut app, "close\n");
+        assert_eq!(app.sql.script_count(), 2);
+        assert_eq!(app.sql.editor.text(), "select 2");
+        key(&mut app, "alt+w alt+w");
+        assert_eq!(app.sql.script_count(), 1);
+        assert!(app.sql.editor.is_empty());
+        // :clear empties the current script, undoable.
+        write(&mut app, "select 4");
+        key(&mut app, "ctrl+p");
+        write(&mut app, "clear\n");
+        assert!(app.sql.editor.is_empty());
+        key(&mut app, "ctrl+z");
+        assert_eq!(app.sql.editor.text(), "select 4");
     }
 
     #[test]
@@ -1741,4 +1847,172 @@ mod sql {
         assert!(executed(&key_effects(&mut app, "ctrl+e")).is_empty());
         assert_eq!(app.status.as_ref().map(|s| s.level), Some(Level::Warning));
     }
+}
+
+#[test]
+fn virtual_relations_merge_into_details_and_flag_missing_databases() {
+    let mut app = connected_app();
+    app.relations = crate::config::relations::Relations::parse(
+        r#"
+[[relation]]
+from = { database = "demo", table = "orders", columns = ["customer_id"] }
+to = { database = "demo", table = "customers", columns = ["id"] }
+kind = "souple"
+
+[[relation]]
+from = { database = "demo", table = "orders", columns = ["user_id"] }
+to = { database = "auth", table = "users", columns = ["id"] }
+kind = "cross_base"
+"#,
+    )
+    .unwrap();
+    key(&mut app, "2");
+    let effects = key_effects(&mut app, "G enter");
+    let obj = match db(effects).as_slice() {
+        [DbCommand::LoadDetails(o)] => o.clone(),
+        other => panic!("expected details request, got {other:?}"),
+    };
+    assert_eq!(obj.name, "orders");
+    app.update(Msg::Db(DbEvent::DetailsLoaded {
+        details: Box::new(crate::db::schema::ObjectDetails {
+            object: obj.clone(),
+            owner: None,
+            comment: None,
+            columns: vec![],
+            indexes: vec![],
+            constraints: vec![],
+            triggers: vec![],
+            foreign_keys: vec![],
+            referenced_by: vec![],
+            stats: None,
+            properties: vec![],
+            ddl: String::new(),
+        }),
+        elapsed: Duration::ZERO,
+    }));
+    let Some(DetailsState::Loaded(d)) = app.server("local").unwrap().details.get(&obj) else {
+        panic!("details not cached");
+    };
+    let fks = d.foreign_keys.clone();
+    assert_eq!(fks.len(), 2);
+    assert!(fks.iter().all(|fk| fk.is_virtual()));
+    assert_eq!(fks[1].to.database, "auth");
+    // `demo` is on the server, `auth` is not: following the second one warns.
+    assert!(app.has_database(&fks[0].to));
+    assert!(!app.has_database(&fks[1].to));
+}
+
+#[test]
+fn gd_follows_a_reference_filtered_and_ctrl_o_restores_the_previous_filter() {
+    use crate::db::data::{Op, TextRows};
+    use crate::db::schema::{Column, FkAction, FkOrigin, ForeignKey, ObjectDetails};
+
+    fn details(obj: &ObjectRef, cols: &[&str], fks: Vec<ForeignKey>) -> ObjectDetails {
+        ObjectDetails {
+            object: obj.clone(),
+            owner: None,
+            comment: None,
+            columns: cols
+                .iter()
+                .map(|c| Column {
+                    name: c.to_string(),
+                    data_type: "bigint".into(),
+                    nullable: *c != "id",
+                    default: None,
+                    identity: None,
+                    generated: None,
+                    collation: None,
+                    comment: None,
+                    primary_key: *c == "id",
+                    references: None,
+                })
+                .collect(),
+            indexes: vec![],
+            constraints: vec![],
+            triggers: vec![],
+            foreign_keys: fks,
+            referenced_by: vec![],
+            stats: None,
+            properties: vec![],
+            ddl: String::new(),
+        }
+    }
+    fn fetch(effects: &[Effect]) -> (u64, crate::db::data::Filter) {
+        effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::Db(DbCommand::FetchRows { id, request }) => {
+                    Some((*id, request.filter.clone()))
+                }
+                _ => None,
+            })
+            .expect("a fetch")
+    }
+
+    let mut app = connected_app();
+    key(&mut app, "2");
+    let orders = match db(key_effects(&mut app, "G enter")).as_slice() {
+        [DbCommand::LoadDetails(o)] => o.clone(),
+        other => panic!("expected details request, got {other:?}"),
+    };
+    let customers = ObjectRef {
+        name: "customers".into(),
+        ..orders.clone()
+    };
+    let fk = ForeignKey {
+        name: "orders_customer_id_fkey".into(),
+        from: orders.clone(),
+        from_columns: vec!["customer_id".into()],
+        to: customers.clone(),
+        to_columns: vec!["id".into()],
+        on_update: FkAction::NoAction,
+        on_delete: FkAction::NoAction,
+        origin: FkOrigin::Declared,
+    };
+    let effects = app.update(Msg::Db(DbEvent::DetailsLoaded {
+        details: Box::new(details(&orders, &["id", "customer_id"], vec![fk])),
+        elapsed: Duration::ZERO,
+    }));
+    let (id, _) = fetch(&effects);
+    app.update(Msg::Db(DbEvent::RowsLoaded {
+        id,
+        offset: 0,
+        rows: TextRows {
+            columns: vec!["id".into(), "customer_id".into()],
+            rows: vec![vec![Some("1".into()), Some("42".into())]],
+        },
+        elapsed: Duration::ZERO,
+    }));
+    app.data.filter.free_where = Some("id > 0".into());
+
+    // `gd` on `customer_id` opens `customers` filtered on id = 42.
+    key(&mut app, "l");
+    let effects = key_effects(&mut app, "g d");
+    assert_eq!(app.current.as_ref(), Some(&customers));
+    assert!(
+        db(effects)
+            .iter()
+            .any(|c| matches!(c, DbCommand::LoadDetails(o) if o == &customers))
+    );
+    let effects = app.update(Msg::Db(DbEvent::DetailsLoaded {
+        details: Box::new(details(&customers, &["id"], vec![])),
+        elapsed: Duration::ZERO,
+    }));
+    let (_, filter) = fetch(&effects);
+    assert_eq!(filter.conditions.len(), 1);
+    assert_eq!(filter.conditions[0].column, "id");
+    assert_eq!(filter.conditions[0].op, Op::Eq);
+    assert_eq!(filter.conditions[0].value, "42");
+
+    // `Ctrl+o` goes back to `orders` with its own filter.
+    let effects = key_effects(&mut app, "ctrl+o");
+    assert_eq!(app.current.as_ref(), Some(&orders));
+    let (_, filter) = fetch(&effects);
+    assert_eq!(filter.free_where.as_deref(), Some("id > 0"));
+    assert!(filter.conditions.is_empty());
+
+    // NULL / no reference: a message, no jump.
+    key(&mut app, "0");
+    key(&mut app, "g d");
+    assert_eq!(app.current.as_ref(), Some(&orders));
 }

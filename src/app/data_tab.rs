@@ -34,6 +34,9 @@ impl App {
                 return Vec::new();
             };
             self.data = DataView::new(d, self.config.general.page_size, server.conn.read_only);
+            if let Some(filter) = self.take_jump_filter(&obj) {
+                self.data.filter = filter;
+            }
             self.dirty = true;
         }
 
@@ -125,7 +128,15 @@ impl App {
         if self.results_mode
             && matches!(
                 action,
-                FilterEditor | FreeWhere | ClearFilters | Sort | ClearSort | Refresh
+                FilterEditor
+                    | FilterByCell
+                    | FreeWhere
+                    | ClearFilters
+                    | Sort
+                    | ClearSort
+                    | Refresh
+                    | FollowReference
+                    | ShowReferences
             )
         {
             self.notify(
@@ -201,6 +212,9 @@ impl App {
             Copy => return self.copy_data(CopyFormat::Tsv, false, false),
             CopyRow => return self.copy_data(CopyFormat::Tsv, true, false),
             CopyAs => self.overlay = Some(Overlay::CopyFormat { cursor: 0 }),
+            FollowReference => self.follow_reference(),
+            ShowReferences => self.show_references(),
+            JumpBack => self.jump_back(),
             Export => self.open_export(),
             Search => {
                 self.overlay = Some(Overlay::DataSearch {
@@ -219,6 +233,7 @@ impl App {
                 );
                 self.overlay = Some(Overlay::FilterEditor(Box::new(editor)));
             }
+            FilterByCell => self.filter_by_cell(),
             FreeWhere => {
                 let text = self.data.filter.free_where.clone().unwrap_or_default();
                 self.overlay = Some(Overlay::FreeWhere(LineInput::with_text(text)));
@@ -341,6 +356,56 @@ impl App {
         vec![Effect::Copy(text)]
     }
 
+    /// `*`: adds (or replaces) the condition `column = value of the cell`
+    /// (`IS NULL` for NULL) and reloads.
+    fn filter_by_cell(&mut self) {
+        use crate::db::data::{Combinator, Condition, Op};
+        let Some(column) = self.data.current_column().map(|c| c.name.clone()) else {
+            return;
+        };
+        let Some(value) = self.data.value(self.data.grid.row, self.data.grid.col) else {
+            self.notify(Level::Warning, "Ligne non chargée");
+            return;
+        };
+        let condition = match value {
+            Some(v) => Condition {
+                column: column.clone(),
+                op: Op::Eq,
+                value: v.to_string(),
+            },
+            None => Condition {
+                column: column.clone(),
+                op: Op::IsNull,
+                value: String::new(),
+            },
+        };
+        let shown = match value {
+            Some(v) => format!("{column} = {v}"),
+            None => format!("{column} IS NULL"),
+        };
+        let filter = &mut self.data.filter;
+        filter.conditions.retain(|c| c.column != column);
+        filter.conditions.push(condition);
+        // Narrowing down: the conditions are combined with AND.
+        filter.combinator = Combinator::And;
+        self.requery(false);
+        self.notify(
+            Level::Info,
+            format!("Filtre : {shown} (f pour modifier, C pour effacer)"),
+        );
+    }
+
+    /// Search as you type: highlight and move to the first match.
+    pub(super) fn incremental_search(&mut self, text: &str) {
+        self.data.search = (!text.is_empty()).then(|| text.to_string());
+        if let Some((row, col)) = self.data.find_match(true) {
+            self.data.grid.row = row;
+            self.data.grid.col = col;
+            let rows = self.data.row_count();
+            self.data.grid.scroll_into_view(rows);
+        }
+    }
+
     pub(super) fn on_data_overlay_key(&mut self, key: KeyEvent) -> Vec<Effect> {
         let Some(overlay) = self.overlay.take() else {
             return Vec::new();
@@ -363,14 +428,7 @@ impl App {
                 InputOutcome::Cancel => self.data.search = previous,
                 outcome => {
                     if outcome == InputOutcome::Changed {
-                        // Incremental: highlight and move to the first match.
-                        self.data.search = (!input.is_empty()).then(|| input.text().to_string());
-                        if let Some((row, col)) = self.data.find_match(true) {
-                            self.data.grid.row = row;
-                            self.data.grid.col = col;
-                            let rows = self.data.row_count();
-                            self.data.grid.scroll_into_view(rows);
-                        }
+                        self.incremental_search(input.text());
                     }
                     self.overlay = Some(Overlay::DataSearch { input, previous });
                 }

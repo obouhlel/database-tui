@@ -137,6 +137,8 @@ actions! {
     PrevSection => "prev_section", "Section précédente";
     FollowLink => "follow_link", "Aller à la table liée";
     JumpBack => "jump_back", "Revenir à l'objet précédent";
+    FollowReference => "follow_reference", "Aller à la ligne référencée par la cellule";
+    ShowReferences => "show_references", "Tables qui référencent la valeur de la cellule";
     Copy => "copy", "Copier (DDL ou ligne)";
     Refresh => "refresh", "Recharger";
     CellLeft => "cell_left", "Cellule à gauche";
@@ -153,6 +155,7 @@ actions! {
     SearchNext => "search_next", "Occurrence suivante";
     SearchPrev => "search_prev", "Occurrence précédente";
     FilterEditor => "filter_editor", "Filtre par colonne";
+    FilterByCell => "filter_by_cell", "Filtrer sur la valeur de la cellule (colonne = valeur)";
     FreeWhere => "free_where", "Filtre SQL libre (WHERE)";
     ClearFilters => "clear_filters", "Effacer les filtres";
     Sort => "sort", "Trier sur la colonne (asc, desc, aucun)";
@@ -185,6 +188,10 @@ actions! {
     ClearEditor => "clear_editor", "Effacer tout le SQL de l'éditeur (annulable)";
     FocusResults => "focus_results", "Aller aux résultats";
     FocusEditor => "focus_editor", "Revenir à l'éditeur";
+    NewScript => "new_script", "Nouveau script SQL (les autres sont conservés)";
+    CloseScript => "close_script", "Fermer le script SQL courant";
+    NextScript => "next_script", "Script SQL suivant";
+    PrevScript => "prev_script", "Script SQL précédent";
     NextResult => "next_result", "Résultat suivant";
     PrevResult => "prev_result", "Résultat précédent";
 }
@@ -262,7 +269,10 @@ fn defaults() -> Vec<(Context, Action, &'static [&'static str])> {
         (Data, FirstColumn, &["0", "^"]),
         (Data, LastColumn, &["$"]),
         (Data, Detail, &["enter"]),
-        (Data, PeekReference, &["K", "gd"]),
+        (Data, PeekReference, &["K"]),
+        (Data, FollowReference, &["gd"]),
+        (Data, ShowReferences, &["gr"]),
+        (Data, JumpBack, &["ctrl+o"]),
         (Data, Visual, &["v"]),
         (Data, VisualLine, &["V"]),
         (Data, Copy, &["y"]),
@@ -272,6 +282,7 @@ fn defaults() -> Vec<(Context, Action, &'static [&'static str])> {
         (Data, SearchNext, &["n"]),
         (Data, SearchPrev, &["N"]),
         (Data, FilterEditor, &["f"]),
+        (Data, FilterByCell, &["*"]),
         (Data, FreeWhere, &["F"]),
         (Data, ClearFilters, &["C"]),
         (Data, Sort, &["s"]),
@@ -298,8 +309,8 @@ fn defaults() -> Vec<(Context, Action, &'static [&'static str])> {
             &["ctrl+enter", "alt+enter", "ctrl+e"],
         ),
         (SqlEditor, ExecuteScript, &["f5", "ctrl+shift+enter"]),
-        (SqlEditor, NextResult, &["alt+]", "ctrl+pagedown"]),
-        (SqlEditor, PrevResult, &["alt+[", "ctrl+pageup"]),
+        (SqlEditor, NextResult, &["alt+]"]),
+        (SqlEditor, PrevResult, &["alt+["]),
         (SqlEditor, HistorySearch, &["ctrl+r"]),
         (SqlEditor, ClearEditor, &["alt+c"]),
         (SqlEditor, Complete, &["ctrl+space", "ctrl+n"]),
@@ -308,9 +319,16 @@ fn defaults() -> Vec<(Context, Action, &'static [&'static str])> {
         (SqlResults, Explain, &["f6"]),
         (SqlResults, ExplainAnalyze, &["f7"]),
         (SqlEditor, FocusResults, &["ctrl+j"]),
+        (SqlEditor, NewScript, &["ctrl+t"]),
+        (SqlEditor, CloseScript, &["alt+w"]),
+        (SqlEditor, NextScript, &["alt+right", "ctrl+pagedown"]),
+        (SqlEditor, PrevScript, &["alt+left", "ctrl+pageup"]),
+        (SqlResults, NewScript, &["ctrl+t"]),
+        (SqlResults, NextScript, &["alt+right", "ctrl+pagedown"]),
+        (SqlResults, PrevScript, &["alt+left", "ctrl+pageup"]),
         (SqlResults, FocusEditor, &["i", "ctrl+k"]),
-        (SqlResults, NextResult, &["]", "alt+]", "ctrl+pagedown"]),
-        (SqlResults, PrevResult, &["[", "alt+[", "ctrl+pageup"]),
+        (SqlResults, NextResult, &["]", "alt+]"]),
+        (SqlResults, PrevResult, &["[", "alt+["]),
         (SqlResults, ExecuteStatement, &["ctrl+e", "alt+enter"]),
         (SqlResults, ExecuteScript, &["f5"]),
         (SqlResults, HistorySearch, &["ctrl+r"]),

@@ -175,6 +175,30 @@ pub struct ForeignKey {
     pub to_columns: Vec<String>,
     pub on_update: FkAction,
     pub on_delete: FkAction,
+    pub origin: FkOrigin,
+}
+
+/// Where a foreign key comes from.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum FkOrigin {
+    /// A constraint of the database.
+    #[default]
+    Declared,
+    /// A reference the database does not enforce, declared in
+    /// `relations.toml` (see [`crate::config::relations`]).
+    Virtual {
+        /// Free-form nature: `souple`, `cross_base`, `polymorphe`, ...
+        kind: String,
+        /// SQL condition on the source row, for a polymorphic reference.
+        when: Option<String>,
+        note: Option<String>,
+    },
+}
+
+impl ForeignKey {
+    pub fn is_virtual(&self) -> bool {
+        matches!(self.origin, FkOrigin::Virtual { .. })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

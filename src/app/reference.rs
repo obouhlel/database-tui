@@ -1,4 +1,4 @@
-//! `K` / `gd` on a foreign key cell: a popup with the referenced row.
+//! `K` on a foreign key cell: a popup with the referenced row.
 //! The worker resolves the foreign key from the table's details, so it also
 //! works on SQL results that come from a table.
 

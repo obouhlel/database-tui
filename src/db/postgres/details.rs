@@ -8,7 +8,7 @@ use tokio_postgres::types::{Oid, ToSql};
 use super::ddl::{self, SequenceDdl, TableDdl, TableKind};
 use crate::db::catalog::{ObjectKind, ObjectRef};
 use crate::db::schema::{
-    Column, Constraint, ConstraintKind, FkAction, ForeignKey, Generated, Identity, Index,
+    Column, Constraint, ConstraintKind, FkAction, FkOrigin, ForeignKey, Generated, Identity, Index,
     ObjectDetails, Stats, Trigger,
 };
 use crate::sql::quote_qualified;
@@ -199,6 +199,7 @@ async fn relation(client: &Client, obj: &ObjectRef) -> Result<ObjectDetails> {
             to_columns: r.get(8),
             on_update: FkAction::from_pg(&r.get::<_, String>(9)),
             on_delete: FkAction::from_pg(&r.get::<_, String>(10)),
+            origin: FkOrigin::Declared,
         };
         let outgoing = fk.from.schema == obj.schema && fk.from.name == obj.name;
         let incoming = fk.to.schema == obj.schema && fk.to.name == obj.name;

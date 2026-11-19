@@ -132,6 +132,11 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, body: Rect) {
         Some(Overlay::QueryList { names, cursor }) => {
             sql_tab::draw_query_list(frame, app, names, *cursor, body)
         }
+        Some(Overlay::JumpList {
+            title,
+            jumps,
+            cursor,
+        }) => sql_tab::draw_jump_list(frame, app, title, jumps, *cursor, body),
         Some(Overlay::PendingChanges(after)) => {
             edit_popups::draw_pending_changes(frame, app, after, body)
         }

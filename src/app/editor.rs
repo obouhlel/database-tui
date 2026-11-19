@@ -995,6 +995,10 @@ impl Editor {
     fn vim_normal_key(&mut self, key: &KeyEvent) -> EditOutcome {
         use EditOutcome::*;
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if key.modifiers.contains(KeyModifiers::ALT) {
+            // Alt combinations belong to the application (script switching).
+            return Ignored;
+        }
         if ctrl {
             return match key.code {
                 KeyCode::Char('r') => {

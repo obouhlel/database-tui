@@ -266,15 +266,11 @@ pub fn draw_confirm_apply(
 ) {
     let t = &app.theme;
     let color = if production { t.error } else { t.warning };
-    let height = if production { 11 } else { 8 };
-    let rect = centered(area, 72, height);
     let hint = if production {
         " Enter valider · Esc annuler "
     } else {
         " o / Enter appliquer · n / Esc annuler "
     };
-    let block = popup(t, " Appliquer les changements ? ".into(), hint, color);
-    frame.render_widget(Clear, rect);
     let table = app
         .data
         .object
@@ -299,7 +295,6 @@ pub fn draw_confirm_apply(
             t.dim(),
         ),
     ];
-    let mut cursor = None;
     if production {
         let name = app
             .data
@@ -317,21 +312,44 @@ pub fn draw_confirm_apply(
             Span::styled(name, Style::new().fg(t.accent).add_modifier(Modifier::BOLD)),
             Span::styled(" » pour confirmer :", Style::new().fg(t.fg)),
         ]));
-        lines.push(Line::from(vec![
-            Span::styled("> ", Style::new().fg(t.accent)),
-            Span::styled(input.text().to_string(), Style::new().fg(t.fg)),
-        ]));
-        cursor = Some(lines.len() as u16 - 1);
     }
+    let width = 72.min(area.width);
+    let text = Paragraph::new(lines).wrap(Wrap { trim: false });
+    // Wrapped height of the text, so that the input row (production) is
+    // always drawn — and the cursor placed — right below it.
+    let text_h = text.line_count(width.saturating_sub(2)) as u16;
+    let input_h = if production { 1 } else { 0 };
+    let rect = centered(area, width, text_h + input_h + 2);
+    let block = popup(t, " Appliquer les changements ? ".into(), hint, color);
     let inner = block.inner(rect);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(block)
-            .wrap(Wrap { trim: false }),
-        rect,
-    );
-    if let Some(row) = cursor {
-        frame.set_cursor_position((inner.x + 2 + input.cursor_width() as u16, inner.y + row));
+    frame.render_widget(Clear, rect);
+    frame.render_widget(block, rect);
+    let [text_area, input_area] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(input_h)]).areas(inner);
+    frame.render_widget(text, text_area);
+    if production && input_area.height > 0 {
+        let prompt = "> ";
+        let avail = (input_area.width as usize).saturating_sub(prompt.len() + 1);
+        // Scroll horizontally so the cursor stays visible.
+        let cursor = input.cursor_width();
+        let mut skipped = 0;
+        let mut shown = String::new();
+        for c in input.text().chars() {
+            if skipped < cursor.saturating_sub(avail) {
+                skipped += unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+            } else {
+                shown.push(c);
+            }
+        }
+        frame.render_widget(
+            Line::from(vec![
+                Span::styled(prompt, Style::new().fg(t.accent)),
+                Span::styled(shown, Style::new().fg(t.fg)),
+            ]),
+            input_area,
+        );
+        let x = input_area.x + (prompt.len() + cursor.saturating_sub(skipped)) as u16;
+        frame.set_cursor_position((x.min(input_area.right().saturating_sub(1)), input_area.y));
     }
 }
 
