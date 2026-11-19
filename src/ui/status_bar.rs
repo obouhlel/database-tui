@@ -104,10 +104,14 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
 fn right_segment(app: &App) -> Line<'static> {
     let t = &app.theme;
     if let Some(keys) = app.pending_keys() {
-        return Line::styled(
+        let pending = Span::styled(
             format!(" {keys}… "),
             Style::new().fg(t.warning).add_modifier(Modifier::BOLD),
         );
+        // `y` copies at once while waiting for `yy`: keep its message.
+        let mut spans = message(app).spans;
+        spans.push(pending);
+        return Line::from(spans);
     }
     if let Some(busy) = &app.busy {
         return Line::styled(
@@ -120,6 +124,11 @@ fn right_segment(app: &App) -> Line<'static> {
             Style::new().fg(t.info),
         );
     }
+    message(app)
+}
+
+fn message(app: &App) -> Line<'static> {
+    let t = &app.theme;
     if let Some(msg) = &app.status {
         let color = match msg.level {
             Level::Info => t.info,
@@ -127,7 +136,10 @@ fn right_segment(app: &App) -> Line<'static> {
             Level::Warning => t.warning,
             Level::Error => t.error,
         };
-        return Line::styled(format!(" {} ", msg.text), Style::new().fg(color));
+        return Line::from(Span::styled(
+            format!(" {} ", msg.text),
+            Style::new().fg(color),
+        ));
     }
     Line::default()
 }

@@ -39,7 +39,10 @@ pub fn draw_inline_editor(
 ) {
     let t = &app.theme;
     let (x, y, w) = cell;
-    let w = w.max(24).min(bounds.right().saturating_sub(x));
+    // Wider than the column when the value needs it (a generated UUID in a
+    // narrow column), within the grid.
+    let wanted = input.text().width() as u16 + 1;
+    let w = w.max(24).max(wanted).min(bounds.right().saturating_sub(x));
     let rect = Rect {
         x,
         y,
