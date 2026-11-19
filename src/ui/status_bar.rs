@@ -232,6 +232,10 @@ pub fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
                         "historique",
                     ),
                     (hint(Context::SqlEditor, Action::FocusResults), "résultats"),
+                    (
+                        hint(Context::SqlEditor, Action::ClearEditor),
+                        "tout effacer",
+                    ),
                 ];
                 if app.sql.results.len() > 1 {
                     v.push((

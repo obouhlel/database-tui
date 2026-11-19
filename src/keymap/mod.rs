@@ -182,6 +182,7 @@ actions! {
     ExecuteStatement => "execute_statement", "Exécuter l'instruction sous le curseur (ou la sélection)";
     ExecuteScript => "execute_script", "Exécuter tout le script";
     HistorySearch => "history_search", "Rechercher dans l'historique";
+    ClearEditor => "clear_editor", "Effacer tout le SQL de l'éditeur (annulable)";
     FocusResults => "focus_results", "Aller aux résultats";
     FocusEditor => "focus_editor", "Revenir à l'éditeur";
     NextResult => "next_result", "Résultat suivant";
@@ -300,6 +301,7 @@ fn defaults() -> Vec<(Context, Action, &'static [&'static str])> {
         (SqlEditor, NextResult, &["alt+]", "ctrl+pagedown"]),
         (SqlEditor, PrevResult, &["alt+[", "ctrl+pageup"]),
         (SqlEditor, HistorySearch, &["ctrl+r"]),
+        (SqlEditor, ClearEditor, &["alt+c"]),
         (SqlEditor, Complete, &["ctrl+space", "ctrl+n"]),
         (SqlEditor, Explain, &["f6"]),
         (SqlEditor, ExplainAnalyze, &["f7"]),

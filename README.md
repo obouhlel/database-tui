@@ -271,6 +271,7 @@ Couleurs : noms (`red`, `light-blue`, `orange`…), `#rrggbb` ou index ANSI (`20
 | Onglet SQL | `Ctrl+Entrée` · `Ctrl+e` · `Alt+Entrée` | Exécuter l'instruction sous le curseur (ou la sélection) |
 | | `F5` · `Ctrl+Shift+Entrée` | Exécuter tout le script (un sous-onglet par résultat) |
 | | `Ctrl+r` | Historique (recherche floue) |
+| | `Alt+c` · `:clear` | Effacer tout le SQL de l'éditeur (`Ctrl+z`, ou `u` en vim, pour le récupérer) |
 | | `Ctrl+Espace` · `Ctrl+n` | Autocomplétion |
 | | `F6` / `F7` | EXPLAIN / EXPLAIN ANALYZE |
 | | `Ctrl+j` · `Esc` (classique) / `i` · `Ctrl+k` | Aller aux résultats / revenir à l'éditeur |

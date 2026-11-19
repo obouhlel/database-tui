@@ -1277,6 +1277,11 @@ impl App {
                 self.focus = Focus::Center;
                 return self.dispatch_sql(Action::HistorySearch);
             }
+            "clear" => {
+                self.switch_tab(Tab::Sql);
+                self.focus = Focus::Center;
+                self.clear_editor();
+            }
             "schema" => self.tab = Tab::Schema,
             "data" => self.tab = Tab::Data,
             "sql" => self.switch_tab(Tab::Sql),
@@ -1302,6 +1307,7 @@ impl App {
             ("save [nom]", "Enregistrer la requête de l'onglet SQL"),
             ("open [nom]", "Ouvrir une requête enregistrée"),
             ("history", "Rechercher dans l'historique SQL"),
+            ("clear", "Effacer tout le SQL de l'éditeur"),
             ("schema | data | sql", "Changer d'onglet"),
         ]
     }

@@ -265,6 +265,7 @@ impl App {
             }
             ExecuteScript => return self.execute(true),
             HistorySearch => self.open_history_search(),
+            ClearEditor => self.clear_editor(),
             FocusResults => {
                 if self.sql.results.is_empty() {
                     self.notify(Level::Info, "Aucun résultat");
@@ -291,6 +292,20 @@ impl App {
             _ => {}
         }
         Vec::new()
+    }
+
+    /// `Alt+c` / `:clear`: empties the editor, as one undo step.
+    pub(super) fn clear_editor(&mut self) {
+        if self.sql.editor.is_empty() {
+            self.notify(Level::Info, "L'éditeur est déjà vide");
+            return;
+        }
+        self.sql.editor.set_text("");
+        self.sql.focus = SqlFocus::Editor;
+        self.notify(
+            Level::Info,
+            "SQL effacé — Ctrl+z (ou u en vim) pour le récupérer",
+        );
     }
 
     /// Database the next statement runs on.

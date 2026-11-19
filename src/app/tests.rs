@@ -1707,6 +1707,33 @@ mod sql {
     }
 
     #[test]
+    fn clear_the_whole_editor() {
+        let mut app = sql_app();
+        write(&mut app, "select 1;\nselect 2;");
+        key(&mut app, "alt+c");
+        assert!(app.sql.editor.is_empty());
+        // One undo brings everything back.
+        key(&mut app, "ctrl+z");
+        assert_eq!(app.sql.editor.text(), "select 1;\nselect 2;");
+        // Also from the command line, and in vim normal mode.
+        key(&mut app, "ctrl+p");
+        write(&mut app, "clear");
+        key(&mut app, "enter");
+        assert!(app.sql.editor.is_empty());
+
+        let mut app = connected_app();
+        app.sql = crate::app::sql_tab::SqlState::new(crate::config::EditorMode::Vim, 4);
+        key(&mut app, "3");
+        write(&mut app, "iselect 1");
+        key(&mut app, "esc alt+c");
+        assert!(app.sql.editor.is_empty());
+        write(&mut app, "u");
+        assert_eq!(app.sql.editor.text(), "select 1");
+        // The text is intact: Alt+c was not read as vim's `c`.
+        assert_eq!(app.mode(), Mode::Normal);
+    }
+
+    #[test]
     fn no_connection_no_run() {
         let mut app = app_with(&["a"], None);
         key(&mut app, "3");
