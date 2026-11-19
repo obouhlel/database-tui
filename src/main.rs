@@ -57,6 +57,28 @@ fn real_main(cli: Cli) -> Result<()> {
         return Ok(());
     }
 
+    if let Some(names) = &cli.check_connections {
+        for w in &warnings {
+            eprintln!("warning: {w}");
+        }
+        let conns = pgtui::check::select(&config.connections, names)?;
+        println!(
+            "Test de {} connexion(s) de {}\n",
+            conns.len(),
+            config_path.display()
+        );
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .context("cannot start the async runtime")?;
+        let all_ok = runtime.block_on(pgtui::check::run(&conns))?;
+        runtime.shutdown_timeout(std::time::Duration::from_millis(200));
+        if !all_ok {
+            bail!("au moins une connexion a échoué");
+        }
+        return Ok(());
+    }
+
     let (_log_guard, log_file) = logging::init(&paths.state_dir, &config.general.log_level)?;
     tracing::info!(config = %config_path.display(), "pgtui {} starting", env!("CARGO_PKG_VERSION"));
     if created {

@@ -22,4 +22,9 @@ pub struct Cli {
     /// Validate the configuration and exit.
     #[arg(long)]
     pub check_config: bool,
+
+    /// Test the connections of the configuration (all, or the ones named)
+    /// and exit; the exit code is 1 when one of them fails.
+    #[arg(long, value_name = "NAME", num_args = 0.., conflicts_with_all = ["url", "connection"])]
+    pub check_connections: Option<Vec<String>>,
 }

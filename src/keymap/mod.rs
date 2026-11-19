@@ -169,6 +169,9 @@ actions! {
     ConnectionsPage => "connections_page", "Page des connexions (serveurs détectés)";
     Disconnect => "disconnect", "Fermer la connexion";
     DeleteConnection => "delete_connection", "Supprimer la connexion de la liste";
+    AddConnection => "add_connection", "Ajouter une connexion (config.toml dans l'éditeur)";
+    EditConfig => "edit_config", "Modifier la connexion (config.toml dans l'éditeur)";
+    TestConnections => "test_connections", "Tester toutes les connexions";
     EditCell => "edit_cell", "Modifier la cellule";
     InsertRow => "insert_row", "Nouvelle ligne";
     DuplicateRow => "duplicate_row", "Dupliquer la ligne (ou les lignes sélectionnées)";
@@ -252,6 +255,12 @@ fn defaults() -> Vec<(Context, Action, &'static [&'static str])> {
         (Picker, Connect, &["enter"]),
         (Picker, Refresh, &["R"]),
         (Picker, Cancel, &["esc"]),
+        (Picker, AddConnection, &["a"]),
+        (Picker, EditConfig, &["e"]),
+        (Picker, TestConnections, &["T"]),
+        (Tree, AddConnection, &["a"]),
+        (Tree, EditConfig, &["e"]),
+        (Tree, TestConnections, &["T"]),
         (Schema, ScrollLeft, &["h", "left"]),
         (Schema, ScrollRight, &["l", "right"]),
         (Schema, FirstColumn, &["0"]),

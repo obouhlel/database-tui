@@ -1820,3 +1820,26 @@ async fn fetch_the_row_a_foreign_key_points_to() {
     let e = fetch(4, "id", Some("1")).await.unwrap_err();
     assert!(e.contains("clé étrangère"), "{e}");
 }
+
+#[tokio::test]
+async fn probe_reports_success_and_failures() {
+    let Some(url) = test_url() else { return };
+    let (conn, password) = db::connection_from_url("test", &url).unwrap();
+    let ok = db::probe::probe(&conn, password.clone()).await.unwrap();
+    assert!(ok.version.starts_with(char::is_numeric), "{}", ok.version);
+    assert!(!ok.version.contains(' '), "short version: {}", ok.version);
+
+    let mut wrong = conn.clone();
+    wrong.password_cmd = Some("printf not-the-password".into());
+    if password.is_some() {
+        // Only meaningful when the server checks passwords.
+        let e = db::probe::probe(&wrong, None).await.unwrap_err();
+        assert!(e.contains("mot de passe"), "{e}");
+    }
+
+    let mut down = conn.clone();
+    down.host = "127.0.0.1".into();
+    down.port = 1;
+    let e = db::probe::probe(&down, password).await.unwrap_err();
+    assert!(e.contains("refused") || e.contains("refusée"), "{e}");
+}

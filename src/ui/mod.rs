@@ -85,6 +85,10 @@ fn draw_overlay(frame: &mut Frame, app: &mut App, body: Rect) {
         Some(Overlay::Password { conn, input, error }) => {
             popup::draw_password(frame, app, conn, input, error.as_deref(), body);
         }
+        Some(Overlay::Probes(v)) => popup::draw_probes(frame, app, v, body),
+        Some(Overlay::ConfigInvalid { message, .. }) => {
+            popup::draw_config_invalid(frame, app, message, body)
+        }
         Some(Overlay::Error { title, message }) => {
             popup::draw_error(frame, app, title, message, body)
         }

@@ -71,6 +71,33 @@ discover_ports = [5432]    # ex. [5432, 5433]
 
 pgtui démarre directement sur l'écran principal : l'arbre à gauche, les données à droite. La racine de l'arbre liste **les connexions** (config.toml, `--url`, `DATABASE_URL`, serveurs ajoutés depuis la détection). `Entrée` ou `l` sur une connexion la connecte et la déplie ; plusieurs connexions peuvent être ouvertes en même temps, chacune avec son état (« connexion… », version du serveur, « erreur », « déconnecté »). `X` ferme la connexion sous le curseur, `dd` la retire de la liste et de `config.toml` après confirmation (aucune base n'est supprimée sur le serveur). La page des connexions et des serveurs détectés s'ouvre avec `Ctrl+n` ou `:connections`.
 
+## Ajouter, modifier et tester les connexions
+
+Sans quitter pgtui, `a` (ou `:add`) ouvre `config.toml` dans votre éditeur (`$VISUAL`, `$EDITOR`, sinon nano ou vi) sur un bloc `[[connections]]` prêt à compléter. Le bloc contient l'hôte, le port, l'utilisateur, la base, et en commentaire le mot de passe, le TLS, le tunnel et la couleur de production. `e` (ou `:config`) ouvre le fichier sur la connexion sélectionnée dans l'arbre ou la page des connexions.
+
+À la sortie de l'éditeur, pgtui relit le fichier et applique les changements : les connexions ajoutées apparaissent, les retirées disparaissent, et une connexion modifiée qui était ouverte est fermée. **Les connexions ajoutées ou modifiées sont testées aussitôt** (mot de passe, tunnel et TLS compris), avec une ligne par connexion : `✓` version et durée, ou `✗` et le message du serveur. Dans cette fenêtre, `e` corrige la connexion choisie, `r` reteste, `Entrée` l'ouvre dans l'arbre.
+
+Un bloc ajouté puis laissé tel quel est retiré. Si le fichier ne se lit plus (erreur TOML, champ inconnu), pgtui le signale avec la ligne fautive et garde les connexions actuelles ; `e` rouvre l'éditeur sur cette ligne. `T` (ou `:test`) teste toutes les connexions.
+
+En dehors de pgtui, pour un cron ou une CI :
+
+```
+pgtui --check-connections               # toutes les connexions de config.toml
+scripts/check-connections.sh prod       # même chose ; compile pgtui s'il n'est pas dans le PATH
+```
+
+```
+Test de 3 connexion(s) de ~/.config/pgtui/config.toml
+
+OK     globeformation  pgtui@localhost:5433/demo            PostgreSQL 16.15 · 15 ms
+OK     via-tunnel      pgtui@db.interne:5432/demo (tunnel)  PostgreSQL 16.15 · 116 ms
+ÉCHEC  prod            app@db.prod:5432/app                 mot de passe requis ou refusé : password authentication failed for user "app"
+
+2/3 connexion(s) OK
+```
+
+Les tests partent en parallèle, chacun limité à 20 s. Le code de sortie vaut 1 dès qu'une connexion échoue.
+
 ## Toutes les bases du serveur
 
 Sous chaque connexion, l'arbre affiche **toutes les bases** du serveur, avec leur taille (`pg_database`, hors modèles). La base de connexion est dépliée ; déplier une autre base ouvre une connexion vers elle, avec les mêmes identifiants, et charge ses schémas. Une base sans le droit `CONNECT` est marquée « accès refusé ». La barre de statut et l'en-tête des onglets indiquent la base de l'objet ouvert.
@@ -123,6 +150,8 @@ pgtui --connection <nom>       # ouvre directement une entrée de config.toml
 pgtui --url <URL>              # ajoute et ouvre une URL postgres:// ou "host=… user=…"
 pgtui --config <fichier>       # autre fichier de configuration
 pgtui --check-config           # valide la configuration et quitte
+pgtui --check-connections      # teste toutes les connexions et quitte (code 1 si une échoue)
+pgtui --check-connections prod recette   # seulement celles-ci
 ```
 
 Si `DATABASE_URL` est défini, il apparaît comme connexion supplémentaire dans l'arbre (sans connexion automatique).
@@ -262,10 +291,12 @@ Couleurs : noms (`red`, `light-blue`, `orange`…), `#rrggbb` ou index ANSI (`20
 | | `Enter` | Connecter / ouvrir l'objet / déplier le dossier |
 | | `X` | Fermer la connexion sous le curseur |
 | | `dd` | Retirer la connexion de la liste et de `config.toml` (confirmation) |
+| | `a` · `e` · `T` | Ajouter une connexion / modifier la connexion (`config.toml` dans l'éditeur, puis test) / tester toutes les connexions |
 | | `/` | Filtre flou (`schema.table` pour qualifier) |
 | | `Esc` | Effacer le filtre |
 | | `R` | Recharger la liste des bases et les catalogues |
 | Page connexions | `Enter` | Se connecter (formulaire utilisateur / mot de passe pour un serveur détecté) |
+| | `a` · `e` · `T` | Ajouter / modifier (dans l'éditeur, puis test) / tester toutes les connexions |
 | | `R` | Relancer la détection des serveurs locaux |
 | | `Esc` · `q` | Revenir à l'écran principal |
 | Onglet Schema | `[` / `]` | Section précédente / suivante (Colonnes, Index, Contraintes, Triggers, Relations, DDL, Infos) |
@@ -318,7 +349,7 @@ Couleurs : noms (`red`, `light-blue`, `orange`…), `#rrggbb` ou index ANSI (`20
 
 **Presse-papier** — `auto` utilise le presse-papier système (X11, Wayland, macOS, Windows) et bascule sur la séquence OSC 52 (copie via le terminal) en SSH ou si le presse-papier système est indisponible. Sous tmux, OSC 52 demande `set -g set-clipboard on`.
 
-Commandes : `:q` (`:q!` sans confirmation), `:help`, `:reload`, `:connect <nom>`, `:connections`, `:reconnect`, `:disconnect`, `:save [nom]`, `:open [nom]`, `:new`, `:close`, `:clear`, `:history`, `:schema`, `:data`, `:sql`.
+Commandes : `:q` (`:q!` sans confirmation), `:help`, `:reload`, `:connect <nom>`, `:connections`, `:reconnect`, `:disconnect`, `:save [nom]`, `:open [nom]`, `:new`, `:close`, `:clear`, `:config`, `:add`, `:test`, `:history`, `:schema`, `:data`, `:sql`.
 
 Les terminaux compatibles avec le protocole clavier kitty (kitty, WezTerm, Ghostty, foot, Alacritty récent) distinguent `Ctrl+Enter` d'`Enter` ; pgtui l'active automatiquement. Ailleurs (tmux, gnome-terminal), des touches de repli seront toujours proposées.
 
@@ -328,9 +359,11 @@ Les terminaux compatibles avec le protocole clavier kitty (kitty, WezTerm, Ghost
 src/
 ├── main.rs          CLI, chargement config, logs, runtime tokio
 ├── run.rs           boucle d'événements unique (clavier, événements DB, tick, signaux)
-├── terminal.rs      raw mode / écran alternatif, restauration garantie (Drop + hook de panic)
+├── terminal.rs      raw mode / écran alternatif, restauration garantie (Drop + hook de panic), suspension pour l'éditeur
+├── external_editor.rs  $VISUAL / $EDITOR sur une ligne donnée (+N, ou fichier:N pour code, hx, subl, zed)
+├── check.rs         pgtui --check-connections : tests en parallèle et rapport
 ├── clipboard.rs     presse-papier système + repli OSC 52
-├── config/          config.toml (serde), mots de passe, ~/.pgpass, relations.toml
+├── config/          config.toml (serde), mots de passe, ~/.pgpass, relations.toml, bloc modèle d'une connexion
 ├── sql/             quoting des identifiants/littéraux, lexer SQL (coloration), découpage des scripts
 ├── storage.rs       historique et requêtes enregistrées (répertoire de données)
 ├── db/
@@ -340,6 +373,7 @@ src/
 │   ├── changes.rs   changements en attente (UPDATE / INSERT / DELETE) et résultat de leur application
 │   ├── postgres/    tokio-postgres + rustls : connexions, TLS, catalogue, détails, DDL
 │   ├── discover.rs  détection des serveurs locaux (SSLRequest)
+│   ├── probe.rs     test d'une connexion (mot de passe, tunnel, TLS, version) puis fermeture
 │   └── worker.rs    tâche qui possède les connexions (une par base, ouvertes à la demande) ; DbCommand → DbEvent
 ├── app/             état + reducer (aucune I/O) : App::update(Msg) -> Vec<Effect>
 ├── keymap/          touches → actions par contexte, séquences, surcharges

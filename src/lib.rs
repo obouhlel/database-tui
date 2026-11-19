@@ -10,10 +10,12 @@
 //! - [`run`]: the event loop wiring everything together.
 
 pub mod app;
+pub mod check;
 pub mod cli;
 pub mod clipboard;
 pub mod config;
 pub mod db;
+pub mod external_editor;
 pub mod keymap;
 pub mod logging;
 pub mod run;

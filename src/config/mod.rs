@@ -4,6 +4,7 @@
 //! soft problems (plain-text password, several password sources, ...): those
 //! are collected as warnings and surfaced in the UI at startup.
 
+pub mod edit;
 mod example;
 pub mod password;
 pub mod pgpass;

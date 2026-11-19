@@ -116,6 +116,12 @@ pub enum DbCommand {
         connection: String,
         database: String,
     },
+    /// Test a connection (connect, read the version, disconnect), without
+    /// touching the open ones.
+    Probe {
+        id: u64,
+        conn: Box<crate::config::ConnectionConfig>,
+    },
     /// Probe the local machine for PostgreSQL servers.
     Discover {
         ports: Vec<u16>,
@@ -174,6 +180,11 @@ pub enum DbEvent {
     RowsFailed {
         id: u64,
         error: String,
+    },
+    /// Answer to [`DbCommand::Probe`].
+    Probed {
+        id: u64,
+        result: Result<super::probe::ProbeOk, String>,
     },
     /// Answer to [`DbCommand::FetchReference`].
     ReferenceLoaded {
@@ -481,6 +492,13 @@ async fn run(mut commands: UnboundedReceiver<DbCommand>, events: UnboundedSender
                         Err(error) => DbEvent::RowsFailed { id, error },
                     };
                     send(&events, ev);
+                });
+            }
+            DbCommand::Probe { id, conn } => {
+                let events = events.clone();
+                tokio::spawn(async move {
+                    let result = super::probe::probe(&conn, None).await;
+                    send(&events, DbEvent::Probed { id, result });
                 });
             }
             DbCommand::FetchReference {

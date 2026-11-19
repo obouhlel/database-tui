@@ -311,3 +311,148 @@ pub fn draw_palette(frame: &mut Frame, app: &App, input: &LineInput, area: Rect)
     frame.render_widget(ratatui::widgets::Clear, rect);
     frame.render_widget(Paragraph::new(lines).block(block), rect);
 }
+
+/// Connection tests: one line per connection, then the error of the
+/// selected one.
+pub fn draw_probes(
+    frame: &mut Frame,
+    app: &App,
+    v: &crate::app::config_edit::ProbeView,
+    area: Rect,
+) {
+    let t = &app.theme;
+    let name_w = v
+        .rows
+        .iter()
+        .map(|r| r.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    let target_w = v
+        .rows
+        .iter()
+        .map(|r| r.target.chars().count())
+        .max()
+        .unwrap_or(0);
+    let width = 110.min(area.width);
+    let selected_error = v
+        .rows
+        .get(v.cursor)
+        .and_then(|r| r.result.as_ref())
+        .and_then(|r| r.as_ref().err())
+        // The first line is already on the row: the detail only when there
+        // is more, or when it is too long for the row.
+        .filter(|e| {
+            let room = (width as usize).saturating_sub(2 + 3 + name_w + 2 + target_w + 2 + 1);
+            e.lines().count() > 1 || e.chars().count() > room
+        });
+    let error_lines = selected_error.map_or(0, |e| {
+        let w = width.saturating_sub(4).max(1) as usize;
+        e.lines()
+            .map(|l| l.chars().count().div_ceil(w).max(1))
+            .sum::<usize>()
+            + 1
+    });
+    let height = (v.rows.len() + error_lines + 2) as u16 + 2;
+    let rect = centered(area, width, height.min(area.height));
+    let border = if !v.done() {
+        t.accent
+    } else if v.failed() > 0 {
+        t.error
+    } else {
+        t.success
+    };
+    let block = Block::bordered()
+        .title(Span::styled(
+            format!(" {} ", v.title),
+            Style::new().fg(border).add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Line::styled(
+            " j/k choisir · Entrée ouvrir · e modifier · a ajouter · r retester · Esc fermer ",
+            t.dim(),
+        ))
+        .border_style(Style::new().fg(border))
+        .style(t.base());
+    let mut lines = Vec::new();
+    for (i, r) in v.rows.iter().enumerate() {
+        let (status, style, detail) = match &r.result {
+            None => (
+                format!("{} ", super::spinner(app.spinner)),
+                Style::new().fg(t.info),
+                "test en cours…".to_string(),
+            ),
+            Some(Ok(ok)) => (
+                "✓ ".to_string(),
+                Style::new().fg(t.success),
+                format!(
+                    "PostgreSQL {}{} · {} ms",
+                    ok.version,
+                    if ok.tls { " · TLS" } else { "" },
+                    ok.elapsed.as_millis()
+                ),
+            ),
+            Some(Err(e)) => (
+                "✗ ".to_string(),
+                Style::new().fg(t.error),
+                e.lines().next().unwrap_or("").to_string(),
+            ),
+        };
+        // One line per connection: the detail is cut to the room left
+        // (the whole error is shown below for the selected row).
+        let room = (width as usize).saturating_sub(2 + 3 + name_w + 2 + target_w + 2 + 1);
+        let detail = super::table_view::fit(&detail, room).trim_end().to_string();
+        let mut name = Style::new().fg(t.fg).add_modifier(Modifier::BOLD);
+        if i == v.cursor {
+            name = name.bg(t.selection_bg).fg(t.selection_fg);
+        }
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {status}"), style.add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{:name_w$}", r.name), name),
+            Span::styled(format!("  {:target_w$}  ", r.target), t.dim()),
+            Span::styled(detail, style),
+        ]));
+    }
+    if let Some(e) = selected_error {
+        lines.push(Line::default());
+        for l in e.lines() {
+            lines.push(Line::styled(format!(" {l}"), Style::new().fg(t.error)));
+        }
+    }
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false }),
+        rect,
+    );
+}
+
+/// `config.toml` does not parse after editing.
+pub fn draw_config_invalid(frame: &mut Frame, app: &App, message: &str, area: Rect) {
+    let t = &app.theme;
+    let text = format!(
+        "{message}\n\nLe fichier est gardé tel quel ; les connexions actuelles restent en place."
+    );
+    let width = 90.min(area.width);
+    let inner_w = width.saturating_sub(2).max(1) as usize;
+    let lines: usize = text
+        .lines()
+        .map(|l| l.chars().count().div_ceil(inner_w).max(1))
+        .sum();
+    let rect = centered(area, width, (lines as u16 + 2).min(area.height));
+    let block = Block::bordered()
+        .title(Span::styled(
+            " config.toml invalide ",
+            Style::new().fg(t.error).add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Line::styled(
+            " e / Entrée corriger (sur la ligne de l'erreur) · Esc garder les connexions actuelles ",
+            t.dim(),
+        ))
+        .border_style(Style::new().fg(t.error))
+        .style(t.base());
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(text).block(block).wrap(Wrap { trim: false }),
+        rect,
+    );
+}
