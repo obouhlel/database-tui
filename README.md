@@ -95,8 +95,8 @@ Rien n'est écrit en base tant que vous n'avez pas validé : chaque modification
 - **Éditeur** avec coloration, numéros de ligne, indentation automatique (un niveau de plus après une parenthèse ouvrante), annuler / rétablir. Deux jeux de touches au choix dans `[editor] mode` :
   - `classic` (défaut) : toujours en saisie ; `Shift` + flèches sélectionne, `Ctrl+z` / `Ctrl+y` annule / rétablit, `Ctrl+x` / `Ctrl+c` / `Ctrl+v` coupe / copie / colle, `Ctrl+a` sélectionne tout, `Ctrl+d` duplique la ligne, `Tab` / `Shift+Tab` indente la sélection. `Esc` passe aux résultats.
   - `vim` : modes normal / insertion / visuel (`v`, `V`) ; mouvements `h j k l w b e 0 ^ $ gg G` ; opérateurs `d c y` avec un mouvement, `dd cc yy D C x X J p P >> <<` ; `u` / `Ctrl+r`. En mode normal, les touches que vim n'utilise pas restent celles de l'appli (`q`, `:`, `?`, `Tab`, `1`/`2`/`3`).
-- **Exécution** : `Ctrl+Entrée` (ou `Ctrl+e`, `Alt+Entrée`) exécute l'instruction sous le curseur, ou toutes les instructions de la sélection ; `Ctrl+Shift+Entrée` ou `F5` exécute tout le script. Les instructions partent une par une (découpage sur `;` en respectant chaînes, commentaires, `$$…$$` et corps `BEGIN ATOMIC`), et le script s'arrête à la première erreur. Le curseur se place alors sur la position signalée par le serveur.
-- **Résultats** : un sous-onglet par instruction (`[` / `]`), dans le même tableau que l'onglet Data (navigation, recherche `/`, sélection, copie dans tous les formats, vue détail). Les nombres sont alignés selon leur type. Au plus 10 000 lignes sont gardées par résultat (le nombre total est indiqué). `Ctrl+j` va aux résultats, `i` ou `Ctrl+k` revient à l'éditeur.
+- **Exécution** : `Ctrl+Entrée` (ou `Ctrl+e`, `Alt+Entrée`) exécute l'instruction sous le curseur, ou toutes les instructions de la sélection ; `F5` (ou `Ctrl+Shift+Entrée`) exécute tout le script, avec un sous-onglet par instruction. Les instructions partent une par une (découpage sur `;` en respectant chaînes, commentaires, `$$…$$` et corps `BEGIN ATOMIC`), et le script s'arrête à la première erreur. Le curseur se place alors sur la position signalée par le serveur.
+- **Résultats** : un sous-onglet par instruction, nommé d'après la table lue (`orders 3`) ou le verbe (`UPDATE 12`). Après un script, le premier résultat qui a des lignes est affiché (ou l'erreur), et `]` / `[` passent aux suivants (`Alt+]` / `Alt+[` ou `Ctrl+PageDown` / `Ctrl+PageUp` depuis l'éditeur). Avec beaucoup de résultats, la barre défile autour de l'onglet actif (`‹3` / `5›` : onglets masqués). Chaque résultat s'affiche dans le même tableau que l'onglet Data (navigation, recherche `/`, sélection, copie dans tous les formats, vue détail). Les nombres sont alignés selon leur type. Au plus 10 000 lignes sont gardées par résultat (le nombre total est indiqué). `Ctrl+j` va aux résultats, `i` ou `Ctrl+k` revient à l'éditeur.
 - **Cible** : la base de l'objet ouvert ou de la sélection dans l'arbre, affichée en tête de l'onglet. Les requêtes passent par la connexion `session` de cette base : une requête longue y fait attendre l'onglet Data. `Ctrl+c` annule la requête (`pg_cancel_backend` via le jeton d'annulation). Le `statement_timeout` de la configuration s'applique.
 - **Transactions manuelles** : `BEGIN`, `COMMIT`, `ROLLBACK` s'exécutent tels quels. La barre de statut et l'en-tête affichent « TRANSACTION » (et « TRANSACTION EN ÉCHEC » après une erreur, jusqu'au `ROLLBACK`). La cible reste fixe tant que la transaction est ouverte. Quitter ou fermer la connexion pendant une transaction demande confirmation (le serveur l'annule). L'application des changements de l'onglet Data est refusée sur une base où une transaction SQL est ouverte.
 - **Garde-fou** : un `UPDATE` ou un `DELETE` sans `WHERE` (hors sous-requêtes) demande une confirmation explicite avant l'exécution.
@@ -269,12 +269,12 @@ Couleurs : noms (`red`, `light-blue`, `orange`…), `#rrggbb` ou index ANSI (`20
 | | `R`, `Ctrl+c` | Relancer la requête, annuler une requête en cours |
 | | `E` | Exporter (CSV, TSV, JSON, INSERT) |
 | Onglet SQL | `Ctrl+Entrée` · `Ctrl+e` · `Alt+Entrée` | Exécuter l'instruction sous le curseur (ou la sélection) |
-| | `Ctrl+Shift+Entrée` · `F5` | Exécuter tout le script |
+| | `F5` · `Ctrl+Shift+Entrée` | Exécuter tout le script (un sous-onglet par résultat) |
 | | `Ctrl+r` | Historique (recherche floue) |
 | | `Ctrl+Espace` · `Ctrl+n` | Autocomplétion |
 | | `F6` / `F7` | EXPLAIN / EXPLAIN ANALYZE |
 | | `Ctrl+j` · `Esc` (classique) / `i` · `Ctrl+k` | Aller aux résultats / revenir à l'éditeur |
-| | `[` / `]` | Résultat précédent / suivant |
+| | `[` / `]` · `Alt+[` / `Alt+]` · `Ctrl+PageUp` / `Ctrl+PageDown` | Résultat précédent / suivant (les `Alt` et `Ctrl` marchent aussi depuis l'éditeur) |
 | | `Ctrl+c` | Annuler la requête en cours |
 | | `Alt+1/2/3` · `Ctrl+h` · `Ctrl+p` | Changer d'onglet, aller à l'arbre, ligne de commande (depuis l'éditeur) |
 | Édition | `e` · `i` | Modifier la cellule (`Entrée` valider, `Tab` suivante, `Esc` annuler, `Ctrl+n` NULL, `Ctrl+d` DEFAULT, `Ctrl+g` UUID, `Alt+Entrée` multi-ligne) |

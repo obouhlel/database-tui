@@ -181,11 +181,49 @@ fn draw_editor(frame: &mut Frame, app: &mut App, t: &Theme, area: Rect) {
     }
 }
 
+/// First and last tab shown so that `active` is visible within `budget`
+/// columns (each tab takes its label plus a space).
+fn tab_window(labels: &[String], active: usize, budget: usize) -> (usize, usize) {
+    if labels.is_empty() {
+        return (0, 0);
+    }
+    let w: Vec<usize> = labels.iter().map(|l| l.width() + 1).collect();
+    let active = active.min(labels.len() - 1);
+    let mut first = 0;
+    while first < active && w[first..=active].iter().sum::<usize>() > budget {
+        first += 1;
+    }
+    let mut last = active;
+    let mut used: usize = w[first..=active].iter().sum();
+    while last + 1 < labels.len() && used + w[last + 1] <= budget {
+        last += 1;
+        used += w[last];
+    }
+    (first, last)
+}
+
 fn draw_result_tabs(frame: &mut Frame, app: &App, t: &Theme, area: Rect) {
     let focused = app.focus == Focus::Center && app.sql.focus == SqlFocus::Results;
     let mut spans = vec![Span::styled("─ ", Style::new().fg(t.border))];
+    let labels: Vec<String> = app
+        .sql
+        .results
+        .iter()
+        .enumerate()
+        .map(|(i, r)| format!(" {} {} ", i + 1, r.label))
+        .collect();
+    // Many results: a window of tabs around the active one, the rest of the
+    // line is left to the status of the result.
+    let budget = (area.width as usize * 2 / 3).max(20);
+    let (first, last) = tab_window(&labels, app.sql.active, budget);
+    if first > 0 {
+        spans.push(Span::styled(format!("‹{first} "), t.dim()));
+    }
     for (i, r) in app.sql.results.iter().enumerate() {
-        let label = format!(" {} {} ", i + 1, r.label);
+        if i < first || i > last {
+            continue;
+        }
+        let label = labels[i].clone();
         let style = if i == app.sql.active {
             let bg = if r.error {
                 t.error
@@ -205,6 +243,10 @@ fn draw_result_tabs(frame: &mut Frame, app: &App, t: &Theme, area: Rect) {
         };
         spans.push(Span::styled(label, style));
         spans.push(Span::raw(" "));
+    }
+    let hidden = labels.len().saturating_sub(last + 1);
+    if hidden > 0 {
+        spans.push(Span::styled(format!("{hidden}› "), t.dim()));
     }
     if let Some(r) = app.sql.results.get(app.sql.active) {
         if let Some(v) = &r.view {
@@ -662,4 +704,20 @@ fn draw_completion(
         .collect();
     frame.render_widget(Clear, rect);
     frame.render_widget(Paragraph::new(lines).block(block), rect);
+}
+
+#[cfg(test)]
+mod tab_window_tests {
+    use super::tab_window;
+
+    #[test]
+    fn keeps_the_active_tab_visible() {
+        let labels: Vec<String> = (0..10).map(|i| format!(" {i} tab ")).collect();
+        // Each tab is 8 columns wide with its space: 3 fit in 25.
+        assert_eq!(tab_window(&labels, 0, 25), (0, 2));
+        assert_eq!(tab_window(&labels, 5, 25), (3, 5));
+        assert_eq!(tab_window(&labels, 9, 25), (7, 9));
+        assert_eq!(tab_window(&labels, 4, 1000), (0, 9));
+        assert_eq!(tab_window(&[], 0, 25), (0, 0));
+    }
 }

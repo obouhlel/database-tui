@@ -150,6 +150,75 @@ pub fn unrestricted_write(stmt: &str) -> Option<&'static str> {
     (!top[verb..].iter().any(|w| w == "where")).then_some(kind)
 }
 
+/// Table read by a `SELECT` (the first one after its top-level `FROM`),
+/// without schema, for result labels. `None` for anything else.
+pub fn main_table(stmt: &str) -> Option<String> {
+    let tokens: Vec<Token> = tokenize(stmt)
+        .into_iter()
+        .filter(|t| {
+            !matches!(
+                t.kind,
+                TokenKind::Whitespace | TokenKind::LineComment | TokenKind::BlockComment
+            )
+        })
+        .collect();
+    let first = tokens.first()?.text(stmt).to_ascii_lowercase();
+    if first != "select" && first != "with" && first != "table" {
+        return None;
+    }
+    let name = |t: &Token| match t.kind {
+        TokenKind::Word => Some(t.text(stmt).to_string()),
+        TokenKind::QuotedIdent => Some(t.text(stmt).trim_matches('"').replace("\"\"", "\"")),
+        _ => None,
+    };
+    // `TABLE t`
+    let start = if first == "table" {
+        1
+    } else {
+        // Top-level FROM of the main query (after any WITH ... AS (...)).
+        let mut depth = 0i32;
+        let mut at = None;
+        for (i, t) in tokens.iter().enumerate() {
+            match (t.kind, t.text(stmt)) {
+                (TokenKind::Punct, "(") => depth += 1,
+                (TokenKind::Punct, ")") => depth -= 1,
+                (TokenKind::Word, w) if depth == 0 && w.eq_ignore_ascii_case("from") => {
+                    at = Some(i + 1);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        at?
+    };
+    let mut start = start;
+    let first = tokens.get(start)?;
+    if first.kind == TokenKind::Word && super::lexer::is_keyword(first.text(stmt)) {
+        // `FROM ONLY t`; `FROM LATERAL ...`, `FROM (...)`: no single table.
+        if !first.text(stmt).eq_ignore_ascii_case("only") {
+            return None;
+        }
+        start += 1;
+    }
+    qualified_name_at(stmt, &tokens, start, name)
+}
+
+/// Last part of the (possibly qualified) name starting at `tokens[start]`.
+fn qualified_name_at(
+    stmt: &str,
+    tokens: &[Token],
+    start: usize,
+    name: impl Fn(&Token) -> Option<String>,
+) -> Option<String> {
+    let mut table = name(tokens.get(start)?)?;
+    let mut i = start;
+    while tokens.get(i + 1).is_some_and(|t| t.text(stmt) == ".") {
+        table = name(tokens.get(i + 2)?)?;
+        i += 2;
+    }
+    Some(table)
+}
+
 /// First keyword, upper-case (`SELECT`, `UPDATE`, ...), for labels.
 pub fn verb(stmt: &str) -> String {
     words(stmt)
@@ -182,6 +251,33 @@ mod tests {
         );
         assert_eq!(texts("  -- only a comment\n"), Vec::<&str>::new());
         assert_eq!(texts("select 1"), ["select 1"]);
+    }
+
+    #[test]
+    fn main_table_of_a_select() {
+        assert_eq!(
+            main_table("select * from shop.orders where id = 1").as_deref(),
+            Some("orders")
+        );
+        assert_eq!(
+            main_table("SELECT a FROM \"My T\" t").as_deref(),
+            Some("My T")
+        );
+        assert_eq!(
+            main_table("with x as (select 1 from a) select * from b join c on true").as_deref(),
+            Some("b")
+        );
+        assert_eq!(
+            main_table("select (select 1 from a) from only public.b").as_deref(),
+            Some("b")
+        );
+        assert_eq!(
+            main_table("table emargements").as_deref(),
+            Some("emargements")
+        );
+        assert_eq!(main_table("select 1"), None);
+        assert_eq!(main_table("select * from (select 1) s"), None);
+        assert_eq!(main_table("update t set a = 1"), None);
     }
 
     #[test]

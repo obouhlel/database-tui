@@ -1387,6 +1387,29 @@ mod sql {
     }
 
     #[test]
+    fn a_script_shows_one_tab_per_result_from_the_first() {
+        let mut app = sql_app();
+        write(
+            &mut app,
+            "select * from shop.orders;\nset search_path = shop;\nselect * from customers;",
+        );
+        let ex = executed(&key_effects(&mut app, "f5"));
+        let ex = executed(&done(&mut app, ex[0].0, rows_result(3)));
+        let ex = executed(&done(&mut app, ex[0].0, StatementResult::default()));
+        done(&mut app, ex[0].0, rows_result(2));
+        let labels: Vec<&str> = app.sql.results.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(labels, ["orders 3", "SET", "customers 2"]);
+        assert_eq!(app.sql.active, 0, "starts on the first result");
+        // From the editor, Alt+] / Alt+[ go through the results.
+        key(&mut app, "alt+]");
+        assert_eq!(app.sql.active, 1);
+        key(&mut app, "alt+] alt+]");
+        assert_eq!(app.sql.active, 0, "wraps around");
+        key(&mut app, "alt+[");
+        assert_eq!(app.sql.active, 2);
+    }
+
+    #[test]
     fn selection_runs_its_statements() {
         let mut app = sql_app();
         write(&mut app, "select 1;\nselect 2;\nselect 3;");

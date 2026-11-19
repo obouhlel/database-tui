@@ -223,15 +223,30 @@ pub fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
                     .unwrap_or_else(|| hint(Context::Global, Action::CommandPalette));
                 let mut v = vec![
                     (two(Action::ExecuteStatement), "exécuter"),
-                    (hint(Context::SqlEditor, Action::ExecuteScript), "script"),
+                    (
+                        hint(Context::SqlEditor, Action::ExecuteScript),
+                        "tout exécuter",
+                    ),
                     (
                         hint(Context::SqlEditor, Action::HistorySearch),
                         "historique",
                     ),
                     (hint(Context::SqlEditor, Action::FocusResults), "résultats"),
+                ];
+                if app.sql.results.len() > 1 {
+                    v.push((
+                        format!(
+                            "{}/{}",
+                            hint(Context::SqlEditor, Action::PrevResult),
+                            hint(Context::SqlEditor, Action::NextResult)
+                        ),
+                        "onglet de résultat",
+                    ));
+                }
+                v.extend([
                     (hint(Context::Global, Action::FocusTree), "arbre"),
                     (palette, "commande"),
-                ];
+                ]);
                 if app.sql.running.is_some() {
                     v.insert(
                         0,
@@ -247,8 +262,18 @@ pub fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
                 if app.tab == crate::app::Tab::Sql
                     && app.sql.active_view().is_some_and(|v| v.object.is_some()) =>
             {
-                vec![
-                    (hint(Context::SqlResults, Action::FocusEditor), "éditeur"),
+                let mut v = vec![(hint(Context::SqlResults, Action::FocusEditor), "éditeur")];
+                if app.sql.results.len() > 1 {
+                    v.push((
+                        format!(
+                            "{}/{}",
+                            hint(Context::SqlResults, Action::PrevResult),
+                            hint(Context::SqlResults, Action::NextResult)
+                        ),
+                        "résultats",
+                    ));
+                }
+                v.extend([
                     (hint(Context::Data, Action::EditCell), "modifier"),
                     (hint(Context::Data, Action::InsertRow), "nouvelle ligne"),
                     (hint(Context::Data, Action::DuplicateRow), "dupliquer"),
@@ -259,7 +284,8 @@ pub fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
                     (hint(Context::Data, Action::ShowChanges), "changements"),
                     (hint(Context::Data, Action::ApplyChanges), "appliquer"),
                     (hint(Context::Data, Action::Export), "exporter"),
-                ]
+                ]);
+                v
             }
             (Screen::Main, Focus::Center) if app.tab == crate::app::Tab::Sql => vec![
                 (hint(Context::SqlResults, Action::FocusEditor), "éditeur"),
