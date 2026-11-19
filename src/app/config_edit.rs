@@ -152,7 +152,7 @@ impl App {
             }
         }
         // Command-line connections first, then the file's order.
-        let mut servers: Vec<Server> = self.servers.drain(..).collect();
+        let mut servers: Vec<Server> = std::mem::take(&mut self.servers);
         let mut next: Vec<Server> = Vec::new();
         next.extend(servers.iter().filter(|s| !s.saved).cloned());
         for c in &conns {
